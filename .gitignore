@@ -1,0 +1,6 @@
+.env
+.vscode
+historical_data.pkl
+__pycache__
+data
+*.bak
