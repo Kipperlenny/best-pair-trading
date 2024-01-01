@@ -1,6 +1,7 @@
 .env
 .vscode
-historical_data.pkl
+*.pkl
 __pycache__
 data
 *.bak
+*.png
