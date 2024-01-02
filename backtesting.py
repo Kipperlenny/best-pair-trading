@@ -13,16 +13,14 @@ import matplotlib.pyplot as plt
 from plot import create_plots
 from multiprocessing import Pool
 from functools import partial
+from concurrent.futures import ProcessPoolExecutor
+
 
 # Load the .env file
 load_dotenv()
 
 # Set a global default timeout for all requests
 requests.adapters.DEFAULT_RETRIES = 5
-
-# Define a function to apply the backtest function to a chunk of df_params
-def apply_backtest_to_chunk(chunk, data, df_params):
-    return chunk.apply(backtest, args=(data, df_params), axis=1, result_type='expand')
 
 async def download_historical_data(client, pairs, start_time, interval='5m'):
     data = {}
@@ -55,6 +53,7 @@ async def update_historical_data(client, pairs, interval='5m'):
 
     # Get the current time
     now = datetime.now()
+    something_updated = False
 
     for pair in pairs:
         # Get the end time of the last kline in the data
@@ -63,6 +62,8 @@ async def update_historical_data(client, pairs, interval='5m'):
         # only update if older than 24 hours
         if now - last_time < timedelta(hours=24):
             continue
+        else:
+            something_updated = True
 
         print("Updating historical data for", pair, last_time)
 
@@ -78,35 +79,40 @@ async def update_historical_data(client, pairs, interval='5m'):
             data[pair] = pd.concat([data[pair], df])
 
     # Save the updated data to the pickle file
-    with open('historical_data.pkl', 'wb') as f:
-        pickle.dump(data, f)
+    if something_updated:
+        with open('historical_data.pkl', 'wb') as f:
+            pickle.dump(data, f)
 
     return data
 
-def get_best_pair(pairs, percentile=90, min_percent_change_24=0.01, min_percent_change_1=0.01):
-    # remove pairs with less than min_percent_change 24h change
-    pairs = {pair: values for pair, values in pairs.items() if float(values['priceChangePercent']) >= min_percent_change_24}
+def get_best_pair(data, hour, percentile=90, min_percent_change_24=0.01, min_percent_change_1=0.01):
+    
+    # Filter pairs based on min_percent_change_24 and min_percent_change_1
+    pairs = {}
+    for pair, df in data.items():
+        if hour < len(df):
+            row = df.iloc[hour]
+            if row['priceChangePercent'] >= min_percent_change_24 and row['priceChangePercent1h'] >= min_percent_change_1:
+                pairs[pair] = {'priceChangePercent': row['priceChangePercent'], 'priceChangePercent1h': row['priceChangePercent1h'], 'close': row['close']}
 
     if not pairs:
         return None
-
-    # remove pairs with less than min_percent_change 1h change
-    pairs = {pair: values for pair, values in pairs.items() if float(values['priceChangePercent1h']) >= min_percent_change_1}
-
-    if not pairs:
-        return None
-
-    # Sort the pairs by the 1-hour price change in descending order
-    sorted_pairs = sorted(pairs.items(), key=lambda pair: float(pair[1]['priceChangePercent1h']), reverse=True)
-
+    print(str(datetime.now()), "done: Filter pairs based on min_percent_change_24 and min_percent_change_1")
     # Calculate the threshold for the top percentile of 24-hour price changes
-    threshold = np.percentile([float(pair[1]['priceChangePercent']) for pair in pairs.items()], percentile)
-
+    threshold = np.percentile([values['priceChangePercent'] for values in pairs.values()], percentile)
+    print(str(datetime.now()), "done Calculate the threshold for the top percentile of 24-hour price changes")
     # Filter out the pairs that don't have a high 24-hour price change
-    best_pairs = [(pair[0], pair[1]) for pair in sorted_pairs if float(pair[1]['priceChangePercent']) >= threshold]
+    best_pairs = [(pair, values) for pair, values in pairs.items() if values['priceChangePercent'] >= threshold]
+    print(str(datetime.now()), "done Filter out the pairs that don't have a high 24-hour price change")
+    if not best_pairs:
+        return None
 
     # Return the pair with the highest 1-hour price change
-    return best_pairs[0] if best_pairs else None
+    return max(best_pairs, key=lambda pair: pair[1]['priceChangePercent1h'])
+
+def get_best_pair_for_hour(args):
+    data, hour, percentile, min_percent_change_24, min_percent_change_1 = args
+    return get_best_pair(data, hour, percentile, min_percent_change_24, min_percent_change_1)
 
 # Define a function that performs the backtesting for a given percentile and profit margin
 def backtest(row, data, df_params):
@@ -131,74 +137,86 @@ def backtest(row, data, df_params):
         result_columns = ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions']
         if not matching_rows[result_columns].isnull().any().any():
             # If it has all the results, skip the current settings and return
-            return pd.DataFrame(np.nan, index=[0], columns=result_columns)
+            return # pd.DataFrame(np.nan, index=[0], columns=result_columns)
         
     percentile, profit_margin, min_percent_change_24, min_percent_change_1 = row['percentile'], row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1']
 
-    overall_profit_24 = 0
-    overall_profit_72 = 0
-    
-    # Initialize total_hours to 0
-    total_hours_24 = 0
-    total_hours_72 = 0
-
     # Get the maximum number of hours in the data
-    max_hours = max(len(df) // 12 for df in data.values())
+    first_df = next(iter(data.values()))
+    max_hours = len(first_df) // 12
 
     # Subtract 7 days from max_hours
     max_hours -= 168
-
     over_24_hours = 0
     over_72_hours = 0
-
     open_positions = 0
     max_open_positions = 0
+    overall_profit_24 = 0
+    overall_profit_72 = 0
+    total_hours_24 = 0
+    total_hours_72 = 0
 
-    print("\ntesting", row['percentile'], row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], "for", max_hours, "hours")
+    print("\n" + str(datetime.now()), "testing", row['percentile'], row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], "for", max_hours, "hours")
 
-    # For each hour
-    for hour in range(max_hours):
-        # if too many open positions, this has failed
-        # if open_positions > 20:
-        #    print("too many open positions")
-        #    break
+    # max_hours = 100 # for testing
 
-        # Calculate the 1-hour and 24-hour price changes for each pair
-        pairs = {pair: {'priceChangePercent1h': df.iloc[hour]['priceChangePercent1h'] if hour < len(df) else np.nan, 
-                        'priceChangePercent': df.iloc[hour]['priceChangePercent'] if hour < len(df) else np.nan} 
-                 for pair, df in data.items()}
-        
-        # Remove pairs with NaN values
-        pairs = {pair: values for pair, values in pairs.items() if not any(np.isnan(val) for val in values.values())}
+    with ProcessPoolExecutor() as executor:
+        args = [(data, hour, percentile, min_percent_change_24, min_percent_change_1) for hour in range(max_hours)]
+        best_pairs = list(executor.map(get_best_pair_for_hour, args))
 
-        # Find the best pair for this hour
-        best_pair = get_best_pair(pairs, percentile, min_percent_change_24, min_percent_change_1)
+    print(str(datetime.now()), "best_pairs calculated")
+
+    # For each best_pair
+    hour = 0
+    symbol_bought_last = None
+    for best_pair in best_pairs:
+        hour += 12
         if best_pair is not None:
             best_pair_symbol = best_pair[0]
             df = data[best_pair_symbol]
-            bought_price = df.iloc[hour]['close']
+
+            # Calculate the buy time
+            try:
+                buy_time = df.index[hour]
+            except IndexError:
+                continue
+
+            # do not buy if already in wallet
+            if symbol_bought_last == best_pair_symbol:
+                # print("already bought", best_pair_symbol, "at", best_pair[1]['close'], "skipping")
+                continue
+            else:
+                symbol_bought_last = best_pair_symbol
+
+            bought_price = best_pair[1]['close']
             asked_sell_price = bought_price * profit_margin
 
             open_positions += 1
 
-            # Calculate the buy time
-            buy_time = df.index[hour]
+            # print(buy_time, best_pair_symbol, "bought at", bought_price, "for", asked_sell_price, "profit margin")
 
             # Calculate the number of shares that can be bought with an investment of 100
             shares = 100 / bought_price
 
+            if open_positions > max_open_positions:
+                max_open_positions = open_positions
+
             # calculate how many hours it would have taken to sell with profit_margin profit
             sell_time = (df.iloc[hour + 1:]['close'].ge(asked_sell_price)).idxmax()
-            if df.iloc[hour + 1:]['close'].gt(bought_price).any() and sell_time and (sell_time - buy_time).total_seconds() <= 24*60*60: # after 24 hours it's a loss
+            if df.iloc[hour + 1:]['close'].ge(asked_sell_price).any() and sell_time and (sell_time - buy_time).total_seconds() <= 24*60*60: # after 24 hours it's a loss
                 # Calculate the hours between buy and sell times and add to total_hours
                 hours = (sell_time - df.index[hour]) / np.timedelta64(1, 'h')
                 total_hours_24 += hours
-                
+
                 # add profit to overall_profit
                 overall_profit_24 += shares * (asked_sell_price - bought_price)
+                over_24_hours += 1
 
                 open_positions -= 1
-            elif df.iloc[hour + 1:]['close'].gt(bought_price).any() and sell_time and (sell_time - buy_time).total_seconds() <= 72*60*60: # after 72 hours it's a loss
+                symbol_bought_last = None
+
+                # print(sell_time, "sold at", asked_sell_price, "for", shares * (asked_sell_price - bought_price), "profit")
+            elif df.iloc[hour + 1:]['close'].ge(asked_sell_price).any() and sell_time and (sell_time - buy_time).total_seconds() <= 72*60*60: # after 72 hours it's a loss
                 # Calculate the hours between buy and sell times and add to total_hours
                 hours = (sell_time - df.index[hour]) / np.timedelta64(1, 'h')
                 total_hours_72 += hours
@@ -208,19 +226,21 @@ def backtest(row, data, df_params):
                 over_72_hours += 1
 
                 open_positions -= 1
-            elif df.iloc[hour + 1:]['close'].gt(bought_price).any() and sell_time: # after 72 hours it's a loss
+                symbol_bought_last = None
+
+                # print(sell_time, "sold at", asked_sell_price, "for", shares * (asked_sell_price - bought_price), "profit")
+            elif df.iloc[hour + 1:]['close'].ge(asked_sell_price).any() and sell_time: # after 72 hours it's a loss
                 hours = (sell_time - df.index[hour]) / np.timedelta64(1, 'h')
                 total_hours_72 += hours
                 open_positions -= 1
                 over_72_hours += 1
+                symbol_bought_last = None
+
             else:
                 # print(best_pair_symbol, "for hour", hour, "no sell time found")
                 # overall_profit -= 100 # penalty for not selling
                 # total_hours += 16800 # penalty for not selling
                 over_72_hours += 1
-
-        if open_positions > max_open_positions:
-            max_open_positions = open_positions
 
     # reduce overall_profit by invested capital
     # overall_profit -= 100 * max_hours
@@ -234,9 +254,25 @@ def backtest(row, data, df_params):
     total_hours_72 = int(total_hours_72 + total_hours_24)
 
     # Return overall_profit and hours
-    print("result:", overall_profit_24, "profit(24)", overall_profit_72, "profit(72)", total_hours_24, "hours(24)", total_hours_72, "hours(72)", open_positions, "open positions at the end.", max_open_positions, "max open positions")
+    print(str(datetime.now()), "result:", overall_profit_24, "profit(24)", overall_profit_72, "profit(72)", total_hours_24, "hours(24)", total_hours_72, "hours(72)", open_positions, "open positions at the end.", max_open_positions, "max open positions")
+
+    # save values to correct df_params row
+    df_params.loc[
+        (df_params['percentile'] == settings['percentile']) &
+        (df_params['profit_margin'] == settings['profit_margin']) &
+        (df_params['min_percent_change_24'] == settings['min_percent_change_24']) &
+        (df_params['min_percent_change_1'] == settings['min_percent_change_1']),
+        ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions']
+    ] = [overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions]
     
-    return overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions
+    df_params.to_pickle("df_params.pkl")
+
+    # Find the row with the highest overall profit
+    best_row = df_params.loc[df_params['overall_profit_24'].idxmax()]
+
+    print(f"The best percentile is {best_row['percentile']} and the best profit margin is {best_row['profit_margin']} and the best min_percent_change_24 is {best_row['min_percent_change_24']}  and the best min_percent_change_1 is {best_row['min_percent_change_1']}  with an overall profit of {best_row['overall_profit_24']}", best_row)
+
+    # return overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions
 
 async def main():
 
@@ -272,86 +308,21 @@ async def main():
     print("Calculating 24h change for each pair")
     for pair in data:
         data[pair]["close"] = pd.to_numeric(data[pair]["close"])
-        data[pair]["priceChangePercent"] = data[pair]["close"].pct_change(periods=288)
-        data[pair]["priceChangePercent1h"] = data[pair]["close"].pct_change(periods=12)
+        data[pair]["priceChangePercent"] = (data[pair]["close"].shift(12).pct_change(periods=288) * 100).round(2)
+        data[pair]["priceChangePercent1h"] = (data[pair]["close"].pct_change(periods=12).round(3) * 100).round(2)
+        data[pair] = data[pair][['close', 'priceChangePercent', 'priceChangePercent1h']]
 
     # drop all rows with NaN values
     for pair in data:
         data[pair].dropna(inplace=True)
-
-    '''
-    # for every hour in ever DF in data, we select the best pair with get_best_pair() and check after how many hours we would have sold with 3% profit
-    # we then run it again with a different percentile paramter to see how it changes
-    percentiles = range(80, 100)  # replace with the range of percentiles you want to test
-    profit_margins = [i / 100 for i in range(101, 111)]  # creates a list [1.01, 1.02, ..., 1.10]
-
-    best_overall_profit = 0
-    best_percentile = None
-    best_profit_margin = None
-
-    for percentile in percentiles:
-        for profit_margin in profit_margins:
-            overall_profit = 0
-            for pair, df in data.items():
-                df_dropped_na = df.dropna(subset=['priceChangePercent'])
-                for hour, row in df_dropped_na.iterrows():
-                    best_pair = get_best_pair(df, percentile)
-                    if best_pair:
-                        # calculate how many hours it would have taken to sell with profit_margin profit
-                        sell_time = 0
-                        for i in range(hour, len(df)):
-                            if df.iloc[i]['close'] > df.iloc[hour]['close'] * profit_margin:
-                                sell_time = i
-                                # add profit to overall_profit
-                                overall_profit += df.iloc[sell_time]['close'] - df.iloc[hour]['close']
-                                print(f"Pair: {pair} bought at {df.iloc[hour]['close']} and sold at {df.iloc[sell_time]['close']} after {sell_time - hour} hours for a profit of {df.iloc[sell_time]['close'] - df.iloc[hour]['close']}")
-                                break
-            if overall_profit > best_overall_profit:
-                best_overall_profit = overall_profit
-                best_percentile = percentile
-                best_profit_margin = profit_margin
-
-    print(f"The best percentile is {best_percentile} and the best profit margin is {best_profit_margin} with an overall profit of {best_overall_profit}")
-    '''
-
+    
     print("Running backtest")
 
-    '''
-        percentile  profit_margin  overall_profit    total_hours
-    0           95           1.01      165.205270  197102.750000
-    1           95           1.02      268.707313  261372.500000
-    2           95           1.03      362.496960  328234.750000
-    3           95           1.04      450.505411  397228.666667
-    4           96           1.01      166.990118  201003.000000
-    5           96           1.02      259.229385  259271.500000
-    6           96           1.03      353.967689  329152.416667
-    7           96           1.04      441.847971  392900.416667
-    8           97           1.01      185.446738  192885.166667
-    9           97           1.02      282.229302  252212.916667
-    10          97           1.03      391.439703  320912.916667
-    11          97           1.04      505.325740  380357.666667
-    12          98           1.01      208.396776  192630.333333
-    13          98           1.02      308.653700  253066.333333
-    14          98           1.03      420.844829  322382.333333
-    15          98           1.04      560.576355  385820.916667
-    16          99           1.01      219.003579  181407.500000
-    17          99           1.02      315.194761  242095.666667
-    18          99           1.03      413.590521  303419.416667
-    19          99           1.04      539.747701  350310.750000
-    percentile            98.000000
-    profit_margin          1.040000
-    overall_profit       560.576355
-    total_hours       385820.916667
-    Name: 15, dtype: float64
-    The best percentile is 98.0 and the best profit margin is 1.04 with an overall profit of 560.5763550400001
-    '''
-
-
     # Create a DataFrame with all combinations of percentiles and profit margins
-    percentiles = [80, 90, 100]
-    profit_margins = [i / 100 for i in range(101, 135)]
-    min_percent_change_24 = [0.001, 0.01, 0.03, 0.05, 0.1, 0.5]
-    min_percent_change_1 = [0.001, 0.01, 0.03, 0.05, 0.1, 0.5]
+    percentiles = [50, 70, 90]
+    profit_margins = [1.01, 1.03, 1.06, 1.10, 1.15]
+    min_percent_change_24 = [1, 3, 5, 10, 20, 30]
+    min_percent_change_1 = [0.1, 0.5, 1, 1.5, 2, 5]
 
     # Check if df_params.pkl exists
     if os.path.exists('df_params.pkl'):
@@ -370,33 +341,35 @@ async def main():
         df_params['over_72_hours'] = np.nan
         df_params['open_positions'] = np.nan
         df_params['max_open_positions'] = np.nan
-        
-    # Split df_params into 12 chunks
-    chunks = np.array_split(df_params, 3)
+    
+    # print how many rows are left to calculate (all with NaN values)
+    print("Calculating", df_params['overall_profit_24'].isna().sum(), "rows")
 
-    # Create a partial function with data pre-filled
-    apply_backtest_to_chunk_partial = partial(apply_backtest_to_chunk, data=data, df_params=df_params)
+    '''print(data['AEURUSDT']['2023-12-05':'2023-12-09'])
 
-    # Create a pool of worker processes
-    with Pool() as p:
-        # Apply the backtest function to each chunk using the pool
-        results = p.map(apply_backtest_to_chunk_partial, chunks)
+    # Assuming 'close' is the column with closing prices and 'date' is the datetime column
+    plt.figure(figsize=(10, 6))
+    plt.plot(data['AEURUSDT'].index, data['AEURUSDT']['close'])
+    plt.xlabel('Date')
+    plt.ylabel('Close Price')
+    plt.title('Close Price Over Time')
+    plt.savefig("AEURUSDT.png")
+    exit()'''
 
-    # Filter out "empty" results
-    results = [result for result in results if not result.isnull().all().all()]
-
-    # Combine the results back into df_params
-    df_params = pd.concat(results)
+    # Apply the backtest function to df_params
+    df_params.apply(backtest, args=(data, df_params), axis=1, result_type='expand')
 
     # Find the row with the highest overall profit
     best_row = df_params.loc[df_params['overall_profit_24'].idxmax()]
+            
+    # Set the maximum number of rows displayed to a large number
+    pd.set_option('display.max_rows', None)
 
     print(df_params)
     print(best_row)
 
     print(f"The best percentile is {best_row['percentile']} and the best profit margin is {best_row['profit_margin']} and the best min_percent_change_24 is {best_row['min_percent_change_24']}  and the best min_percent_change_1 is {best_row['min_percent_change_1']}  with an overall profit of {best_row['overall_profit_24']}")
 
-    df_params.to_pickle("df_params.pkl")
 
     # Close the client session
     await client.close_connection()
