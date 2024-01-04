@@ -1,21 +1,14 @@
 import math
-from binance import AsyncClient, ThreadedWebsocketManager, ThreadedDepthCacheManager
+from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
-import datetime
-import pytz
 import os
 from dotenv import load_dotenv
 import requests
 import asyncio
 from itertools import islice
-import aiohttp
-import json
-import numpy as np
 import time
-import sqlite3
-from datetime import datetime, timedelta
 
-dry_run = True
+dry_run = False
 
 # Load the .env file
 load_dotenv()
@@ -96,18 +89,22 @@ async def get_24h_window(client, pairs, semaphore):
         except BinanceAPIException as e:
             print(pairs[1], e)
 
-def get_best_pair(pairs, percentile=90):
-    # Sort the pairs by the 1-hour price change in descending order
-    sorted_pairs = sorted(pairs.items(), key=lambda pair: float(pair[1]['priceChangePercent1h']), reverse=True)
+def get_best_pair(pair_data, min_percent_change_24=15, min_percent_change_1=5):
 
-    # Calculate the threshold for the top percentile of 24-hour price changes
-    threshold = np.percentile([float(pair[1]['priceChangePercent']) for pair in pairs.items()], percentile)
+    # Filter pairs based on min_percent_change_24 and min_percent_change_1
+    pairs = {}
+    for pair, row in pair_data.items():
+        if float(row['priceChangePercent']) >= min_percent_change_24 and float(row['priceChangePercent1h']) >= min_percent_change_1:
+            pairs[pair] = {'priceChangePercent': row['priceChangePercent'], 'priceChangePercent1h': row['priceChangePercent1h']}
 
-    # Filter out the pairs that don't have a high 24-hour price change
-    best_pairs = [(pair[0], pair[1]) for pair in sorted_pairs if float(pair[1]['priceChangePercent']) >= threshold]
+    if not pairs:
+        return None
 
-    # Return the pair with the highest 1-hour price change
-    return best_pairs[0] if best_pairs else None
+    # Find the pair with the highest 1-hour price change
+    best_pair = max(pairs, key=lambda pair: pairs[pair]['priceChangePercent1h'])
+
+    # Return the best pair, its 'close' price, and the 'open_time'
+    return best_pair, pair_data[best_pair]
 
 async def place_order(client, pair, amount):
     if dry_run:
@@ -182,7 +179,7 @@ async def place_sell_order(client, pair, symbol, quantity, avg_price):
     quantity = round(quantity, step_size_decimals)
     
     # Calculate the sell price
-    sell_price = avg_price * 1.03 # add 3% profit
+    sell_price = avg_price * 1.15 # add 15% profit
 
     # Get the baseAssetPrecision from the symbol info
     base_asset_precision = pair['baseAssetPrecision']
@@ -264,12 +261,13 @@ async def main():
             symbol = best_pair[0]
             pair = best_pair[1]
         else:
-            print("No best pair found")
-            exit()
+            print("No best pair found, waiting 60min to try again")
+            time.sleep(60 * 60)  # Wait for 60 minutes
+            continue
 
         # Print the results
         '''('FTTUSDT', {'symbol': 'FTTUSDT', 'status': 'TRADING', 'baseAsset': 'FTT', 'baseAssetPrecision': 8, 'quoteAsset': 'USDT', 'quotePrecision': 8, 'quoteAssetPrecision': 8, 'baseCommissionPrecision': 8, 'quoteCommissionPrecision': 8, 'orderTypes': ['LIMIT', 'LIMIT_MAKER', 'MARKET', 'STOP_LOSS_LIMIT', 'TAKE_PROFIT_LIMIT'], 'icebergAllowed': True, 'ocoAllowed': True, 'quoteOrderQtyMarketAllowed': True, 'allowTrailingStop': True, 'cancelReplaceAllowed': True, 'isSpotTradingAllowed': True, 'isMarginTradingAllowed': True, 'priceChange': '0.43180000', 'priceChangePercent': '13.780', 'weightedAvgPrice': '3.37051857', 'prevClosePrice': '3.13270000', 'lastPrice': '3.56530000', 'lastQty': '0.93000000', 'bidPrice': '3.56530000', 'bidQty': '55.16000000', 'askPrice': '3.56630000', 'askQty': '5.39000000', 'openPrice': '3.13350000', 'highPrice': '3.61700000', 'lowPrice': '2.92660000', 'volume': '15472416.83000000', 'quoteVolume': '52150068.18244700', 'openTime': 1703852634537, 'closeTime': 1703939034537, 'firstId': 67466636, 'lastId': 67835478, 'count': 368843, 'priceChangePercent1h': '2.475'})'''
-        print(best_pair)
+        print(symbol, pair)
 
         # Place an order for the best pair
         order = await place_order(client, symbol, 10)
