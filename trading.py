@@ -15,6 +15,7 @@ min_percent_change_1=0.5
 max_percent_change_24=50
 max_percent_change_1=2
 needed_profit = 1.03
+amount_for_order = 10
 
 # Load the .env file
 load_dotenv()
@@ -276,7 +277,7 @@ async def main():
         print(symbol, pair)
 
         # Place an order for the best pair
-        order = await place_order(client, symbol, 10)
+        order = await place_order(client, symbol, amount_for_order)
         print(order)
 
         # query the order result
