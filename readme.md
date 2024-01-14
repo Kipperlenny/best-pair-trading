@@ -2,14 +2,12 @@
 
 This code tries to find the best pair to trade now (or every hour) on binance.
 It can automatically trade as well - but only use paper trading and never use this with real money!
-The hyperopt can be used with different timeframe, it can plot the results and test the found strategy.
+The hyperopt can be used with different timeframes, it can plot the results and test the found strategy.
 
 ## Table of Contents
 
 - [Installation](#installation)
 - [Usage](#usage)
-- [Features](#features)
-- [Contributing](#contributing)
 - [License](#license)
 
 ## Installation
