@@ -151,7 +151,7 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
 
     if not matching_rows.empty:
         # If such a row exists, check if it has all the results
-        result_columns = ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions']
+        result_columns = ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions', 'trades']
         if not matching_rows[result_columns].isnull().any().any():
             # If it has all the results, skip the current settings and return
             return # pd.DataFrame(np.nan, index=[0], columns=result_columns)
@@ -172,6 +172,7 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
     overall_profit_72 = 0
     total_hours_24 = 0
     total_hours_72 = 0
+    trades = 0
 
     print("\n" + str(datetime.now()), "testing row", this_row_count, "/", sum_rows, "settings:", row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], row['max_percent_change_24'], row['max_percent_change_1'], "for", max_hours, "hours")
 
@@ -208,15 +209,13 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
             asked_sell_price = bought_price * profit_margin
 
             open_positions += 1
+            trades += 1
 
             if rerun:
                 print(open_time, best_pair_symbol, "bought at", bought_price, "for", asked_sell_price, "profit margin")
 
             # Calculate the number of shares that can be bought with an investment of 100
             shares = 100 / bought_price
-
-            if open_positions > max_open_positions:
-                max_open_positions = open_positions
 
            # Get the location of open_time
             loc = df.index.get_loc(open_time)
@@ -277,6 +276,9 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
                 overall_profit_24 -= 100 # penalty for not selling
                 over_72_hours += 1
 
+            if open_positions > max_open_positions:
+                max_open_positions = open_positions
+
     # reduce overall_profit by invested capital
     # overall_profit -= 100 * max_hours
 
@@ -289,10 +291,10 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
     total_hours_72 = int(total_hours_72)
 
     # Return overall_profit and hours
-    print(str(datetime.now()), "result:", overall_profit_24, "profit(24)", overall_profit_72, "profit(72)", total_hours_24, "hours(24)", total_hours_72, "hours(72)", open_positions, "open positions at the end.", max_open_positions, "max open positions")
+    print(str(datetime.now()), "result:", overall_profit_24, "profit(24)", overall_profit_72, "profit(72)", total_hours_24, "hours(24)", total_hours_72, "hours(72)", open_positions, "open positions at the end.", max_open_positions, "max open positions", trades, "trades")
 
     this_row_count += 1  # Increment the row count
-    
+
     # score = calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_hours * len(pair_data.keys()))
 
     # Save the score to df_params
@@ -302,8 +304,8 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
         (df_params['min_percent_change_1'] == settings['min_percent_change_1']) &
         (df_params['max_percent_change_24'] == settings['max_percent_change_24']) &
         (df_params['max_percent_change_1'] == settings['max_percent_change_1']),
-        ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions', 'score']
-    ] = [overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions, 0]
+        ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions', 'trades', 'score']
+    ] = [overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions, trades, 0]
 
     # Sort df_params by the score
     # df_params = df_params.sort_values(by='score', ascending=False)
@@ -358,7 +360,10 @@ def rescore_only(file_name, train_data_length = 0.8):
     # Iterate over the rows of df_params
     for index, row in df_params.iterrows():
         # Recalculate the score
-        new_score = calculate_score(row['overall_profit_24'], row['open_positions'], row['total_hours_24'], row['total_hours_72'], max_hours)
+        if row['overall_profit_24'] <= 0:
+            new_score = -1
+        else:
+            new_score = calculate_score(row['overall_profit_24'], row['open_positions'], row['total_hours_24'], row['total_hours_72'], max_hours)
 
         # Update the score in df_params
         df_params.loc[index, 'score'] = new_score
@@ -395,7 +400,9 @@ def filter_candle_and_pair_data(t_data, min_change_24, min_change_1, max_change_
         pair_data[pair]["close"] = pd.to_numeric(pair_data[pair]["close"])
         pair_data[pair]["priceChangePercent"] = (pair_data[pair]["close"].shift(12).pct_change(periods=288) * 100).round(2)
         pair_data[pair]["priceChangePercent1h"] = (pair_data[pair]["close"].pct_change(periods=12).round(3) * 100).round(2)
-        
+
+        pair_data[pair] = pair_data[pair].dropna(subset=['priceChangePercent', 'priceChangePercent1h'])
+
         # Filter the data
         pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] >= min_change_24) & (pair_data[pair]['priceChangePercent1h'] >= min_change_1)]
         pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] <= max_change_24) & (pair_data[pair]['priceChangePercent1h'] <= max_change_1)]
@@ -432,8 +439,15 @@ def create_or_get_params_file(file_name, profit_margins, min_percent_change_24, 
         df_params = pd.read_pickle(file_name + '.pkl')
     else:
         # If it doesn't exist, create df_params
-        df_params = pd.DataFrame([(m, m24, m1, ma24, ma1) for m in profit_margins for m24 in min_percent_change_24 for m1 in min_percent_change_1 for ma24 in max_percent_change_24 for ma1 in max_percent_change_1], columns=['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'])
-
+        df_params = pd.DataFrame([(m, m24, m1, ma24, ma1) 
+                                for m in profit_margins 
+                                for m24 in min_percent_change_24 
+                                for m1 in min_percent_change_1 
+                                for ma24 in max_percent_change_24 
+                                for ma1 in max_percent_change_1 
+                                if m24 <= ma24 and m1 <= ma1 and m24 / ma24 < 0.75 and m1 / ma1 < 0.75], 
+                                columns=['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'])
+        
         # Initialize the result columns with np.nan
         df_params['overall_profit_24'] = np.nan
         df_params['overall_profit_72'] = np.nan
@@ -443,6 +457,7 @@ def create_or_get_params_file(file_name, profit_margins, min_percent_change_24, 
         df_params['over_72_hours'] = np.nan
         df_params['open_positions'] = np.nan
         df_params['max_open_positions'] = np.nan
+        df_params['trades'] = np.nan
         df_params['score'] = np.nan
     
     # print how many rows are left to calculate (all with NaN values)
@@ -493,21 +508,48 @@ def test(test_data, train_file_name, file_name):
         print(train_file_name + '.pkl does not exist, run the train first!')
         exit()
 
-    # get the highest profit margin row from df_params from the 20 highest scores
+    # first remove duplicates on score and overall_profit_24
+    df_params = df_params.drop_duplicates(subset=['score', 'overall_profit_24'])
+
+    # Reset the index of df_params
+    # df_params = df_params.reset_index(drop=True)
+
+    # Round 'open_positions' and 'overall_profit_24' to 2 decimal places
+    df_params['open_positions_rounded'] = df_params['open_positions'].round(2)
+    df_params['overall_profit_24_rounded'] = df_params['overall_profit_24'].round(2)
+
+    # Filter rows with positive 'overall_profit_24_rounded'
+    df_params = df_params[df_params['overall_profit_24_rounded'] > 0]
+
+    # Group by 'open_positions_rounded' and 'overall_profit_24_rounded', and keep only the row with the highest score in each group
+    df_params = df_params.loc[df_params.groupby(['open_positions_rounded', 'overall_profit_24_rounded'])['score'].idxmax()]
+
     df_params = df_params.nlargest(20, 'score')
     df_params = df_params.sort_values(by='profit_margin', ascending=False)
+
+    # Get the index of the best row
+    best_row_index = df_params.index[0]
+
     df_params = df_params.iloc[0:1]
 
-    profit_margins = df_params.iloc[0:1]['profit_margin']
-    min_percent_change_24 = df_params.iloc[0:1]['min_percent_change_24']
-    min_percent_change_1 = df_params.iloc[0:1]['min_percent_change_1']
-    max_percent_change_24 = df_params.iloc[0:1]['max_percent_change_24']
-    max_percent_change_1 = df_params.iloc[0:1]['max_percent_change_1']
+    profit_margins = [df_params.iat[0, df_params.columns.get_loc('profit_margin')]]
+    min_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('min_percent_change_24')]]
+    min_percent_change_1 = [df_params.iat[0, df_params.columns.get_loc('min_percent_change_1')]]
+    max_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_24')]]
+    max_percent_change_1 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_1')]]
     
+    print("Best row index is:", best_row_index, " - Testing with profit margin", profit_margins, "and min_percent_change_24", min_percent_change_24, "and min_percent_change_1", min_percent_change_1, "and max_percent_change_24", max_percent_change_24, "and max_percent_change_1", max_percent_change_1)
+
     # Filter the candle and pair data
-    candle_data, pair_data = filter_candle_and_pair_data(test_data, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1)
+    candle_data, pair_data = filter_candle_and_pair_data(test_data, min_percent_change_24[0], min_percent_change_1[0], max_percent_change_24[0], max_percent_change_1[0])
+
+    if not candle_data or not pair_data:
+        print("With these settings, no trades would be made in the test data")
+        return
 
     test_params, sum_rows = create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, False)
+
+    test_params['score'] = df_params.iat[0, df_params.columns.get_loc('score')]
 
     # Now run this row on the test data and output the results
     test_params.apply(calculation, args=(file_name, sum_rows, candle_data, pair_data, test_params, False), axis=1, result_type='expand')
@@ -624,5 +666,24 @@ if __name__ == "__main__":
     rerun = args.rerun
     rescore = args.rescore
     show = args.show
+
+    # Convert args.start_candle and args.end_candle to datetime objects
+    start_candle_date = datetime.strptime(args.start_candle, "%Y-%m-%d %H:%M")if args.start_candle else None
+    end_candle_date = datetime.strptime(args.end_candle, "%Y-%m-%d %H:%M") if args.end_candle else None
+
+    # Compare start_candle_date to the datetime object for 2023-10-01
+    if args.start_candle and start_candle_date < datetime(2023, 10, 1):
+        print("Start candle must be after 2023-10-1")
+        exit()
+
+    # Compare end_candle_date to start_candle_date + 1 week
+    if end_candle_date and end_candle_date < start_candle_date + timedelta(weeks=1):
+        print("End candle must be at least one week after start candle")
+        exit()
+
+    # Compare end_candle_date to the current date and time
+    if end_candle_date and end_candle_date > datetime.now():
+        print("End candle cannot be later than now")
+        exit()
 
     asyncio.run(main(rerun, rescore, show, args))
