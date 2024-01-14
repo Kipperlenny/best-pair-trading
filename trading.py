@@ -89,12 +89,12 @@ async def get_24h_window(client, pairs, semaphore):
         except BinanceAPIException as e:
             print(pairs[1], e)
 
-def get_best_pair(pair_data, min_percent_change_24=15, min_percent_change_1=5):
+def get_best_pair(pair_data, min_percent_change_24=20, min_percent_change_1=0.5, max_percent_change_24=50, max_percent_change_1=2):
 
     # Filter pairs based on min_percent_change_24 and min_percent_change_1
     pairs = {}
     for pair, row in pair_data.items():
-        if float(row['priceChangePercent']) >= min_percent_change_24 and float(row['priceChangePercent1h']) >= min_percent_change_1:
+        if float(row['priceChangePercent']) >= min_percent_change_24 and float(row['priceChangePercent1h']) >= min_percent_change_1 and float(row['priceChangePercent']) <= max_percent_change_24 and float(row['priceChangePercent1h']) <= max_percent_change_1:
             pairs[pair] = {'priceChangePercent': row['priceChangePercent'], 'priceChangePercent1h': row['priceChangePercent1h']}
 
     if not pairs:
@@ -179,7 +179,7 @@ async def place_sell_order(client, pair, symbol, quantity, avg_price):
     quantity = round(quantity, step_size_decimals)
     
     # Calculate the sell price
-    sell_price = avg_price * 1.15 # add 15% profit
+    sell_price = avg_price * 1.03 # add 3% profit
 
     # Get the baseAssetPrecision from the symbol info
     base_asset_precision = pair['baseAssetPrecision']

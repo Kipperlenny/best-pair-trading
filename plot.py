@@ -1,8 +1,9 @@
+import argparse
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 import pandas as pd
 
-def create_plots(df_params):
+def create_plots(df_params, file_suffix = "_manual"):
     plt.clf()
     # Reset the index of df_params
     df_params = df_params.reset_index(drop=True)
@@ -34,7 +35,7 @@ def create_plots(df_params):
         plt.text(row['open_positions'], row['overall_profit_24'], str(i))
 
     # Show the plot
-    plt.savefig("best_rows.png")
+    plt.savefig("best_rows" + file_suffix + ".png")
 
     '''score over profit'''
 
@@ -64,9 +65,19 @@ def create_plots(df_params):
     best_rows = best_rows.drop_duplicates(subset=['score', 'total_profit'])
 
     # Show the plot
-    plt.savefig("score_vs_total_profit.png")
+    plt.savefig("score_vs_total_profit" + file_suffix + ".png")
 
 
 if __name__ == "__main__":
-    df_params = pd.read_pickle("df_params.pkl")
+    
+    parser = argparse.ArgumentParser(description='hyperopting script')
+    parser.add_argument('--file_name', type=str, default="df_params.pkl", required=True)
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # Get the settings and action
+    file_name = args.file_name
+
+    df_params = pd.read_pickle(file_name)
     create_plots(df_params)

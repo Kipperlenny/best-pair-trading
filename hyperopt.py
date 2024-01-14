@@ -1,28 +1,40 @@
-# backtesting.py
+# hyperopting.py
 import argparse
-import math
 import pandas as pd
 import pickle
 from datetime import datetime, timedelta
-from binance import AsyncClient, ThreadedWebsocketManager, ThreadedDepthCacheManager
-from binance.exceptions import BinanceAPIException
+from binance import AsyncClient
 import asyncio
 import os
 from dotenv import load_dotenv
 import requests
 import numpy as np
-import matplotlib.pyplot as plt
 from plot import create_plots
-from multiprocessing import Pool
-from functools import partial
 from concurrent.futures import ProcessPoolExecutor
-
 
 # Load the .env file
 load_dotenv()
 
 # Set a global default timeout for all requests
 requests.adapters.DEFAULT_RETRIES = 5
+
+train_test_split = 0.8
+sell_period = 0.1
+
+# Define a weight for open_positions
+weight_open_positions = 5
+
+# Define a weight for overall_profit_24
+weight_overall_profit_24 = 0.15
+
+# Define a weight for total_hours_24
+weight_total_hours_24 = 0.03
+
+# Define a weight for total_hours_24
+weight_total_hours_72 = 1
+
+# Initialize the global variable outside the function (do not change)
+this_row_count = 0
 
 async def download_historical_data(client, pairs, start_time, interval='5m'):
     data = {}
@@ -58,6 +70,10 @@ async def update_historical_data(client, pairs, interval='5m'):
     something_updated = False
 
     for pair in pairs:
+        # check if pair is in data
+        if pair not in data:
+            continue
+
         # Get the end time of the last kline in the data
         last_time = data[pair].iloc[-1]['close_time']
 
@@ -112,8 +128,9 @@ def get_best_pair_for_hour(args):
     pair_data, hour, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1 = args
     return get_best_pair(pair_data, hour, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1)
 
-# Define a function that performs the backtesting for a given profit margin
-def backtest(row, candle_data, pair_data, df_params, rerun):
+def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rerun = False):
+    global this_row_count
+
     # Define the settings
     settings = {
         'profit_margin': row['profit_margin'],
@@ -146,7 +163,7 @@ def backtest(row, candle_data, pair_data, df_params, rerun):
     max_hours = len(first_df) // 12
 
     # Subtract 7 days from max_hours
-    max_hours -= 168
+    max_hours -= int(max_hours * sell_period)
     over_24_hours = 0
     over_72_hours = 0
     open_positions = 0
@@ -156,7 +173,7 @@ def backtest(row, candle_data, pair_data, df_params, rerun):
     total_hours_24 = 0
     total_hours_72 = 0
 
-    print("\n" + str(datetime.now()), "testing", row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], row['max_percent_change_24'], row['max_percent_change_1'], "for", max_hours, "hours")
+    print("\n" + str(datetime.now()), "testing row", this_row_count, "/", sum_rows, "settings:", row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], row['max_percent_change_24'], row['max_percent_change_1'], "for", max_hours, "hours")
 
     # max_hours = 100 # for testing
 
@@ -258,7 +275,6 @@ def backtest(row, candle_data, pair_data, df_params, rerun):
                 if rerun:
                     print(best_pair_symbol, "for", open_time, "no sell time found")
                 overall_profit_24 -= 100 # penalty for not selling
-                # total_hours += 16800 # penalty for not selling
                 over_72_hours += 1
 
     # reduce overall_profit by invested capital
@@ -275,7 +291,9 @@ def backtest(row, candle_data, pair_data, df_params, rerun):
     # Return overall_profit and hours
     print(str(datetime.now()), "result:", overall_profit_24, "profit(24)", overall_profit_72, "profit(72)", total_hours_24, "hours(24)", total_hours_72, "hours(72)", open_positions, "open positions at the end.", max_open_positions, "max open positions")
 
-    score = calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_hours * len(pair_data.keys()))
+    this_row_count += 1  # Increment the row count
+    
+    # score = calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_hours * len(pair_data.keys()))
 
     # Save the score to df_params
     df_params.loc[
@@ -285,35 +303,23 @@ def backtest(row, candle_data, pair_data, df_params, rerun):
         (df_params['max_percent_change_24'] == settings['max_percent_change_24']) &
         (df_params['max_percent_change_1'] == settings['max_percent_change_1']),
         ['overall_profit_24', 'overall_profit_72', 'total_hours_24', 'total_hours_72', 'over_24_hours', 'over_72_hours', 'open_positions', 'max_open_positions', 'score']
-    ] = [overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions, score]
+    ] = [overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions, 0]
 
     # Sort df_params by the score
-    df_params = df_params.sort_values(by='score', ascending=False)
+    # df_params = df_params.sort_values(by='score', ascending=False)
 
     # Find the row with the highest overall profit
-    best_row = df_params.iloc[0]
+    # best_row = df_params.iloc[0]
 
     if not rerun:
-        df_params.to_pickle("df_params.pkl")
+        df_params.to_pickle(file_name + ".pkl")
 
-    print(f"The best profit margin is {best_row['profit_margin']} and the best max_percent_change_24 is {best_row['max_percent_change_24']}  and the best max_percent_change_1 is {best_row['max_percent_change_1']} and the best min_percent_change_24 is {best_row['min_percent_change_24']}  and the best min_percent_change_1 is {best_row['min_percent_change_1']}  with an overall profit of {best_row['overall_profit_24']}")
-    print(best_row)
+    # print(f"The best profit margin is {best_row['profit_margin']} and the best max_percent_change_24 is {best_row['max_percent_change_24']}  and the best max_percent_change_1 is {best_row['max_percent_change_1']} and the best min_percent_change_24 is {best_row['min_percent_change_24']}  and the best min_percent_change_1 is {best_row['min_percent_change_1']}  with an overall profit of {best_row['overall_profit_24']}")
+    # print(best_row)
 
     # return overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions
 
 def calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_total_hours):
-    # Define a weight for open_positions
-    weight_open_positions = 5
-
-    # Define a weight for overall_profit_24
-    weight_overall_profit_24 = 0.15
-
-    # Define a weight for total_hours_24
-    weight_total_hours_24 = 0.03
-
-    # Define a weight for total_hours_24
-    weight_total_hours_72 = 1
-
     # Normalize total_hours_24
     normalized_total_hours_24 = (max_total_hours / total_hours_24 if total_hours_24 > 0 else 1) / 100
 
@@ -331,18 +337,19 @@ def calculate_score(overall_profit_24, open_positions, total_hours_24, total_hou
 
     return round(score*10)
 
-def rescore_only():
+def rescore_only(file_name, train_data_length = 0.8):
     # Load df_params from the pickle file
-    df_params = pd.read_pickle('df_params.pkl')
+    df_params = pd.read_pickle(file_name + '.pkl')
 
     # Get the maximum number of hours in the data
     with open('historical_data.pkl', 'rb') as f:
         data = pickle.load(f)
+
     first_df = next(iter(data.values()))
-    max_hours = len(first_df) // 12
+    max_hours = int(len(first_df) * train_data_length) // 12
 
     # Subtract 7 days from max_hours
-    max_hours -= 168
+    max_hours -= int(max_hours * sell_period)
 
     max_hours *= len(data.keys())
 
@@ -364,29 +371,163 @@ def rescore_only():
     print(df_params)
 
     # Save df_params back to the pickle file
-    df_params.to_pickle('df_params.pkl')
+    df_params.to_pickle(file_name + '.pkl')
 
-def show_only(index):
+def show_only(index, file_name):
     # Load df_params from the pickle file
-    df_params = pd.read_pickle('df_params.pkl')
+    df_params = pd.read_pickle(file_name + '.pkl')
 
     print(df_params.iloc[index])
     exit()
 
-async def main(rerun, rescore, profit_margin, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, show):
+def filter_candle_and_pair_data(t_data, min_change_24, min_change_1, max_change_24, max_change_1):
+    
+    candle_data = {}
+    pair_data = {}
+    for pair in t_data:
+        if t_data[pair].empty:
+            continue
+
+        candle_data[pair] = t_data[pair].copy()
+        pair_data[pair] = t_data[pair].copy()
+        
+        candle_data[pair]["close"] = pd.to_numeric(candle_data[pair]["close"])
+        pair_data[pair]["close"] = pd.to_numeric(pair_data[pair]["close"])
+        pair_data[pair]["priceChangePercent"] = (pair_data[pair]["close"].shift(12).pct_change(periods=288) * 100).round(2)
+        pair_data[pair]["priceChangePercent1h"] = (pair_data[pair]["close"].pct_change(periods=12).round(3) * 100).round(2)
+        
+        # Filter the data
+        pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] >= min_change_24) & (pair_data[pair]['priceChangePercent1h'] >= min_change_1)]
+        pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] <= max_change_24) & (pair_data[pair]['priceChangePercent1h'] <= max_change_1)]
+        
+        # Filter rows for 5 minutes after each hour
+        mask = (pair_data[pair].index.minute == 5)
+        pair_data[pair] = pair_data[pair][mask]
+
+        pair_data[pair] = pair_data[pair][['close', 'priceChangePercent', 'priceChangePercent1h']]
+
+    # drop all rows with NaN values and remove pairs that never meet the required minimums
+    pairs_to_delete = []
+    for pair in t_data:
+        if pair not in candle_data:
+            continue
+
+        candle_data[pair].dropna(inplace=True)
+        pair_data[pair].dropna(inplace=True)
+        
+        if pair_data[pair].empty:
+            pairs_to_delete.append(pair)
+
+    for pair in pairs_to_delete:
+        del candle_data[pair]
+        del pair_data[pair]
+
+    return candle_data, pair_data
+
+def create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, rerun = False):
+    
+    # Check if df_params.pkl exists
+    if os.path.exists(file_name + '.pkl') and not rerun:
+        # If it exists, load it
+        df_params = pd.read_pickle(file_name + '.pkl')
+    else:
+        # If it doesn't exist, create df_params
+        df_params = pd.DataFrame([(m, m24, m1, ma24, ma1) for m in profit_margins for m24 in min_percent_change_24 for m1 in min_percent_change_1 for ma24 in max_percent_change_24 for ma1 in max_percent_change_1], columns=['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'])
+
+        # Initialize the result columns with np.nan
+        df_params['overall_profit_24'] = np.nan
+        df_params['overall_profit_72'] = np.nan
+        df_params['total_hours_24'] = np.nan
+        df_params['total_hours_72'] = np.nan
+        df_params['over_24_hours'] = np.nan
+        df_params['over_72_hours'] = np.nan
+        df_params['open_positions'] = np.nan
+        df_params['max_open_positions'] = np.nan
+        df_params['score'] = np.nan
+    
+    # print how many rows are left to calculate (all with NaN values)
+    sum_rows = df_params['overall_profit_24'].isna().sum()
+    print("Calculating", sum_rows, "rows")
+
+    return df_params, sum_rows
+
+def train(train_data, file_name, rerun = False, args = {}):
+
+    if rerun:
+        profit_margins = [args.profit_margin]
+        min_percent_change_24 = [args.min_percent_change_24]
+        min_percent_change_1 = [args.min_percent_change_1]
+        max_percent_change_24 = [args.max_percent_change_24]
+        max_percent_change_1 = [args.max_percent_change_1]
+    else:
+        profit_margins = [1.01, 1.02, 1.03, 1.05, 1.15]
+        min_percent_change_24 = [5, 10, 20, 25, 30]
+        min_percent_change_1 = [0.3, 0.75, 1.5, 5, 20]
+        max_percent_change_24 = [10, 20, 40, 80]
+        max_percent_change_1 = [1, 2, 10, 40]
+
+    # Get the minimum values
+    min_change_24 = min(min_percent_change_24)
+    min_change_1 = min(min_percent_change_1)
+    max_change_24 = max(max_percent_change_24)
+    max_change_1 = max(max_percent_change_1)
+
+    # Filter the candle and pair data
+    print("Calculating 24h change for each pair")
+    candle_data, pair_data = filter_candle_and_pair_data(train_data, min_change_24, min_change_1, max_change_24, max_change_1)
+
+    print("Running hyperopt")
+
+    df_params, sum_rows = create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, rerun)
+
+    # Apply the hyperopt function to df_params
+    df_params.apply(calculation, args=(file_name, sum_rows, candle_data, pair_data, df_params, rerun), axis=1, result_type='expand')
+
+def test(test_data, train_file_name, file_name):
+
+    # Check if df_params.pkl exists
+    if os.path.exists(train_file_name + '.pkl'):
+        # If it exists, load it
+        df_params = pd.read_pickle(train_file_name + '.pkl')
+    else:
+        print(train_file_name + '.pkl does not exist, run the train first!')
+        exit()
+
+    # get the highest profit margin row from df_params from the 20 highest scores
+    df_params = df_params.nlargest(20, 'score')
+    df_params = df_params.sort_values(by='profit_margin', ascending=False)
+    df_params = df_params.iloc[0:1]
+
+    profit_margins = df_params.iloc[0:1]['profit_margin']
+    min_percent_change_24 = df_params.iloc[0:1]['min_percent_change_24']
+    min_percent_change_1 = df_params.iloc[0:1]['min_percent_change_1']
+    max_percent_change_24 = df_params.iloc[0:1]['max_percent_change_24']
+    max_percent_change_1 = df_params.iloc[0:1]['max_percent_change_1']
+    
+    # Filter the candle and pair data
+    candle_data, pair_data = filter_candle_and_pair_data(test_data, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1)
+
+    test_params, sum_rows = create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, False)
+
+    # Now run this row on the test data and output the results
+    test_params.apply(calculation, args=(file_name, sum_rows, candle_data, pair_data, test_params, False), axis=1, result_type='expand')
+
+    best_row = test_params.iloc[0]
+
+    print(f"The profit is {best_row['overall_profit_24']} on the test data")
+    print(best_row)
+
+async def main(rerun, rescore, show, args):
 
     if rescore:
-        rescore_only()
+        rescore_only(args, args.based_on)
         exit()
-    elif show:
-        show_only(show)
+    elif show > -1:
+        show_only(show, args.based_on)
         exit()
 
     # Initialize the Binance client
     client = await AsyncClient.create(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_SECRET"))
-
-    # Create a semaphore with a limit of 10 concurrent requests
-    semaphore = asyncio.Semaphore(10)
 
     # first we get all USDT pairs from binance
     all_pairs = await client.get_exchange_info()
@@ -410,120 +551,50 @@ async def main(rerun, rescore, profit_margin, min_percent_change_24, min_percent
     else:
         data = await download_historical_data(client, usdt_pairs.keys(), start_time)
 
-    # calculate the 24h change for each pair
-    print("Calculating 24h change for each pair")
+    if args.start_candle != "" and args.end_candle != "":
+        # Parse the start and end candles into datetime objects
+        start_candle = datetime.strptime(args.start_candle, "%Y-%m-%d %H:%M") if args.start_candle else None
+        end_candle = datetime.strptime(args.end_candle, "%Y-%m-%d %H:%M") if args.end_candle else None
 
-    # Create a DataFrame with all combinations and profit margins
-    # percentiles = [50, 70, 90]
-    if rerun:
-        profit_margins = [profit_margin]
-        min_percent_change_24 = [min_percent_change_24]
-        min_percent_change_1 = [min_percent_change_1]
-        max_percent_change_24 = [max_percent_change_24]
-        max_percent_change_1 = [max_percent_change_1]
-    else:
-        profit_margins = [1.01, 1.02, 1.03, 1.05, 1.06, 1.08, 1.10, 1.15, 1.5, 2, 5]
-        min_percent_change_24 = [1, 3, 5, 10, 15, 20, 25, 30, 40, 50]
-        min_percent_change_1 = [0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 5, 10, 15, 20, 40]
-        max_percent_change_24 = [1, 3, 5, 10, 15, 20, 25, 30, 40, 50]
-        max_percent_change_1 = [0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 5, 10, 15, 20, 40]
-
-    # Get the minimum values
-    min_change_24 = min(min_percent_change_24)
-    min_change_1 = min(min_percent_change_1)
-    max_change_24 = max(max_percent_change_24)
-    max_change_1 = max(max_percent_change_1)
-
-    candle_data = {}
-    pair_data = {}
-    for pair in data:
-        candle_data[pair] = data[pair].copy()
-        pair_data[pair] = data[pair].copy()
-        
-        candle_data[pair]["close"] = pd.to_numeric(candle_data[pair]["close"])
-        pair_data[pair]["close"] = pd.to_numeric(pair_data[pair]["close"])
-        pair_data[pair]["priceChangePercent"] = (pair_data[pair]["close"].shift(12).pct_change(periods=288) * 100).round(2)
-        pair_data[pair]["priceChangePercent1h"] = (pair_data[pair]["close"].pct_change(periods=12).round(3) * 100).round(2)
-        
         # Filter the data
-        pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] >= min_change_24) & (pair_data[pair]['priceChangePercent1h'] >= min_change_1)]
-        pair_data[pair] = pair_data[pair][(pair_data[pair]['priceChangePercent'] <= max_change_24) & (pair_data[pair]['priceChangePercent1h'] <= max_change_1)]
-        
-        # Filter rows for 5 minutes after each hour
-        mask = (pair_data[pair].index.minute == 5)
-        pair_data[pair] = pair_data[pair][mask]
+        for pair in data:
+            pair_start_candle = data[pair].index.asof(start_candle) if start_candle else None
+            pair_end_candle = data[pair].index.asof(end_candle) if end_candle else None
+            data[pair] = data[pair].loc[pair_start_candle:pair_end_candle]
 
-        pair_data[pair] = pair_data[pair][['close', 'priceChangePercent', 'priceChangePercent1h']]
-
-    # drop all rows with NaN values and remove pairs that never meet the required minimums
-    pairs_to_delete = []
+    # split data into training and test data
+    train_data = {}
+    test_data = {}
     for pair in data:
-        candle_data[pair].dropna(inplace=True)
-        pair_data[pair].dropna(inplace=True)
-        
-        if pair_data[pair].empty:
-            pairs_to_delete.append(pair)
+        train_size = int(len(data[pair]) * train_test_split)
+        train_data[pair] = data[pair].iloc[:train_size]
+        test_data[pair] = data[pair].iloc[train_size:]
 
-    for pair in pairs_to_delete:
-        del candle_data[pair]
-        del pair_data[pair]
+    print("train_data", len(train_data), "from", list(train_data.values())[0].iloc[0]["close_time"], "to", list(train_data.values())[0].iloc[-1]["close_time"])
+    print("test_data", len(test_data), "from", list(test_data.values())[0].iloc[0]["close_time"], "to", list(test_data.values())[0].iloc[-1]["close_time"])
 
-    print("Running backtest")
+    filename_friendly_from = list(data.values())[0].iloc[0]["close_time"].strftime("%Y-%m-%d_%H%M%S%f")
+    filename_friendly_to = list(data.values())[0].iloc[-1]["close_time"].strftime("%Y-%m-%d_%H%M%S%f")
+    file_name = "df_params_" + filename_friendly_from + "_" + filename_friendly_to
 
-    # Check if df_params.pkl exists
-    if os.path.exists('df_params.pkl') and not rerun:
-        # If it exists, load it
-        df_params = pd.read_pickle('df_params.pkl')
-    else:
-        # If it doesn't exist, create df_params
-        df_params = pd.DataFrame([(m, m24, m1, ma24, ma1) for m in profit_margins for m24 in min_percent_change_24 for m1 in min_percent_change_1 for ma24 in max_percent_change_24 for ma1 in max_percent_change_1], columns=['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'])
+    print("working and saving on file:", file_name)
 
-        # Initialize the result columns with np.nan
-        df_params['overall_profit_24'] = np.nan
-        df_params['overall_profit_72'] = np.nan
-        df_params['total_hours_24'] = np.nan
-        df_params['total_hours_72'] = np.nan
-        df_params['over_24_hours'] = np.nan
-        df_params['over_72_hours'] = np.nan
-        df_params['open_positions'] = np.nan
-        df_params['max_open_positions'] = np.nan
-        df_params['score'] = np.nan
-    
-    # print how many rows are left to calculate (all with NaN values)
-    print("Calculating", df_params['overall_profit_24'].isna().sum(), "rows")
+    # hyperopt on the train data
+    print("Hyperopting on the train data")
+    train(train_data, file_name + '_train', rerun, args)
 
-    '''
-    pd.set_option('display.max_rows', None)
-    pd.set_option('display.max_columns', None)
-    df = data['1000SATSUSDT']
-    filtered_df = df.loc['2023-12-16 08:00:00':'2023-12-16 14:00:00']
+    # we now need to score each result
+    print("Score the results")
+    rescore_only(file_name + '_train', train_test_split)
 
-    print(pair_data['1000SATSUSDT'])
-    print(filtered_df)
-    plt.figure(figsize=(10, 6))
-    plt.plot(filtered_df.index, filtered_df['close'])
-    plt.xlabel('Date')
-    plt.ylabel('Close Price')
-    plt.title('Close Price Over Time')
+    # plot the results
+    print("Plot the results")
+    df_params = pd.read_pickle(file_name + "_train.pkl")
+    create_plots(df_params, filename_friendly_from + "_" + filename_friendly_to)
 
-    # Set the range of the y-axis to the min and max 'close' price
-    plt.ylim(filtered_df['close'].min(), filtered_df['close'].max())
-
-    plt.savefig("1000SATSUSDT.png")
-    exit()'''
-
-    # Apply the backtest function to df_params
-    df_params.apply(backtest, args=(candle_data, pair_data, df_params, rerun), axis=1, result_type='expand')
-            
-    # Set the maximum number of rows displayed to a large number
-    pd.set_option('display.max_rows', None)
-
-    print(df_params)
-
-    best_row = df_params.iloc[0]
-
-    print(f"The best profit margin is {best_row['profit_margin']} and the best max_percent_change_24 is {best_row['max_percent_change_24']}  and the best max_percent_change_1 is {best_row['max_percent_change_1']} and the best min_percent_change_24 is {best_row['min_percent_change_24']}  and the best min_percent_change_1 is {best_row['min_percent_change_1']}  with an overall profit of {best_row['overall_profit_24']}")
-    print(best_row)
+    # score on the test data
+    print("Test our best row on the test data")
+    test(test_data, file_name + '_train', file_name + '_test')
 
     # Close the client session
     await client.close_connection()
@@ -531,29 +602,27 @@ async def main(rerun, rescore, profit_margin, min_percent_change_24, min_percent
 if __name__ == "__main__":
 
     # Create the parser
-    parser = argparse.ArgumentParser(description='Backtesting script')
+    parser = argparse.ArgumentParser(description='hyperopting script')
 
     # Add the arguments
-    parser.add_argument('--profit_margin', type=float, default=1.0, required=False, help='The settings for the backtesting')
-    parser.add_argument('--min_percent_change_24', type=float, default=1.0, required=False, help='The settings for the backtesting')
-    parser.add_argument('--min_percent_change_1', type=float, default=1.0, required=False, help='The settings for the backtesting')
-    parser.add_argument('--max_percent_change_24', type=float, default=1.0, required=False, help='The settings for the backtesting')
-    parser.add_argument('--max_percent_change_1', type=float, default=1.0, required=False, help='The settings for the backtesting')
-    parser.add_argument('--rerun', type=bool, default=False, required=False, help='The action to perform')
-    parser.add_argument('--rescore', type=bool, default=False, required=False, help='The action to perform')
-    parser.add_argument('--show', type=int, default=False, required=False, help='show an index from the df_params')
+    parser.add_argument('--profit_margin', type=float, default=1.0, required=False)
+    parser.add_argument('--min_percent_change_24', type=float, default=1.0, required=False)
+    parser.add_argument('--min_percent_change_1', type=float, default=1.0, required=False)
+    parser.add_argument('--max_percent_change_24', type=float, default=1.0, required=False)
+    parser.add_argument('--max_percent_change_1', type=float, default=1.0, required=False)
+    parser.add_argument('--rerun', type=bool, default=False, required=False, help='rerun the hyperopting with specific parameters to output debug data')
+    parser.add_argument('--rescore', type=bool, default=False, required=False)
+    parser.add_argument('--show', type=int, default=-1, required=False, help='show an index from the df_params')
+    parser.add_argument('--based_on', type=str, default="", required=False, help='for showing, rescoreing and reruning, specify the file_name')
+    parser.add_argument('--start_candle', type=str, default="", required=False, help='Start candle in the format "YYYY-MM-DD HH:MM" for the whole data')
+    parser.add_argument('--end_candle', type=str, default="", required=False, help='End candle in the format "YYYY-MM-DD HH:MM" for the whole data')
 
     # Parse the arguments
     args = parser.parse_args()
 
     # Get the settings and action
-    profit_margin = args.profit_margin
-    min_percent_change_24 = args.min_percent_change_24
-    min_percent_change_1 = args.min_percent_change_1
-    max_percent_change_24 = args.max_percent_change_24
-    max_percent_change_1 = args.max_percent_change_1
     rerun = args.rerun
     rescore = args.rescore
     show = args.show
 
-    asyncio.run(main(rerun, rescore, profit_margin, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, show))
+    asyncio.run(main(rerun, rescore, show, args))
