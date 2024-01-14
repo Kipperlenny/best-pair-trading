@@ -525,7 +525,7 @@ def test(test_data, train_file_name, file_name):
     df_params = df_params.loc[df_params.groupby(['open_positions_rounded', 'overall_profit_24_rounded'])['score'].idxmax()]
 
     df_params = df_params.nlargest(20, 'score')
-    df_params = df_params.sort_values(by='profit_margin', ascending=False)
+    df_params = df_params.sort_values(by='overall_profit_24_rounded', ascending=False)
 
     # Get the index of the best row
     best_row_index = df_params.index[0]
@@ -560,6 +560,7 @@ def test(test_data, train_file_name, file_name):
     print(best_row)
 
 async def main(rerun, rescore, show, args):
+    global this_row_count
 
     if rescore:
         rescore_only(args, args.based_on)
@@ -624,6 +625,7 @@ async def main(rerun, rescore, show, args):
     # hyperopt on the train data
     print("Hyperopting on the train data")
     train(train_data, file_name + '_train', rerun, args)
+    this_row_count = 0
 
     # we now need to score each result
     print("Score the results")
@@ -637,6 +639,7 @@ async def main(rerun, rescore, show, args):
     # score on the test data
     print("Test our best row on the test data")
     test(test_data, file_name + '_train', file_name + '_test')
+    this_row_count = 0
 
     # Close the client session
     await client.close_connection()
