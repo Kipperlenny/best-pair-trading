@@ -84,5 +84,5 @@ def get_best_index(best_rows):
         # If there are no points that are both to the right and above the middle,
         # get the index of the point with the smallest distance to the middle point
         best_index = distances_to_middle.idxmin()
-
+    
     return best_index, middle_point

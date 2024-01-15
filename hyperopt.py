@@ -9,9 +9,13 @@ import os
 from dotenv import load_dotenv
 import requests
 import numpy as np
+from sklearn.model_selection import GridSearchCV
 from plot import create_plots
 from concurrent.futures import ProcessPoolExecutor
 from helper import filter_similar_and_get_best_rows, get_best_index
+from sklearn.preprocessing import StandardScaler
+import xgboost as xgb
+
 
 # Load the .env file
 load_dotenv()
@@ -164,7 +168,8 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
     max_hours = len(first_df) // 12
 
     # Subtract 7 days from max_hours
-    max_hours -= int(max_hours * sell_period)
+    sell_hours = min(72, int(max_hours * sell_period))
+    max_hours -= sell_hours
     over_24_hours = 0
     over_72_hours = 0
     open_positions = 0
@@ -175,7 +180,7 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
     total_hours_72 = 0
     trades = 0
 
-    print("\n" + str(datetime.now()), "testing row", this_row_count, "/", sum_rows, "settings:", row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], row['max_percent_change_24'], row['max_percent_change_1'], "for", max_hours, "hours")
+    print("\n" + str(datetime.now()), "testing row", this_row_count, "/", sum_rows, "settings:", row['profit_margin'], row['min_percent_change_24'], row['min_percent_change_1'], row['max_percent_change_24'], row['max_percent_change_1'], "for", max_hours, "hours", "sell_period after the hours is", sell_hours)
 
     # max_hours = 100 # for testing
 
@@ -296,8 +301,6 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
 
     this_row_count += 1  # Increment the row count
 
-    # score = calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_hours * len(pair_data.keys()))
-
     # Save the score to df_params
     df_params.loc[
         (df_params['profit_margin'] == settings['profit_margin']) &
@@ -322,27 +325,107 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
 
     # return overall_profit_24, overall_profit_72, total_hours_24, total_hours_72, over_24_hours, over_72_hours, open_positions, max_open_positions
 
-def calculate_score(overall_profit_24, open_positions, total_hours_24, total_hours_72, max_total_hours):
-    # Normalize total_hours_24
-    normalized_total_hours_24 = (max_total_hours / total_hours_24 if total_hours_24 > 0 else 1) / 100
+'''
+1. Define the Problem: Clearly define what you want to predict.
+--> In your case, you want to predict the 'score' of each strategy.
 
-    # Normalize total_hours_72
-    normalized_total_hours_72 = (max_total_hours / total_hours_72 if total_hours_72 > 0 else 1) / 100
+2. Feature Selection: Identify the features that could potentially be used for prediction.
+--> In your case, these could be 'overall_profit_24', 'open_positions', 'total_hours_24', 'total_hours_72', and 'max_total_hours'. You might also want to consider other features that could be relevant.
 
-    # Calculate the score
-    score = (weight_overall_profit_24 * overall_profit_24 if open_positions == 0 else weight_overall_profit_24 * overall_profit_24 - (weight_open_positions * open_positions))
+3. Data Preprocessing: Clean and preprocess your data. This could involve handling missing values, dealing with outliers, and so on.
+--> fillna, clip
 
-    # Subtract the penalty for high total_hours_24 values
-    score += weight_total_hours_24 * normalized_total_hours_24
+4. Data Normalization: Normalize your data so that all features have the same scale. This is important because many machine learning algorithms perform better when the input features are on a similar scale.
+--> StandardScaler
 
-    # Subtract the penalty for high total_hours_72 values
-    score += weight_total_hours_72 * normalized_total_hours_72
+5. Model Selection: Choose a machine learning model. Since you're predicting a continuous value ('score'), you could use a regression model. Simple models like Linear Regression could work well, but you might also want to consider more complex models like Random Forest Regression or Gradient Boosting Regression.
+--> XGBoost Regression model
 
-    return round(score*10)
+6. Train the Model: Split your data into a training set and a test set, and then train your model on the training set.
+
+7. Evaluate the Model: Evaluate your model's performance on the test set. You might want to use metrics like Mean Absolute Error (MAE), Mean Squared Error (MSE), or Root Mean Squared Error (RMSE).
+
+8. Tune the Model: If your model's performance is not satisfactory, you might want to tune its parameters or try a different model.
+
+9. Predict Scores: Once you're happy with your model's performance, you can use it to predict the 'score' of each strategy.
+'''
+def calculate_score(row, model, scaler):
+    # Create a dataframe from the row
+    df = pd.DataFrame([row])
+
+    # Scale features
+    df_scaled = pd.DataFrame(scaler.transform(df), columns=df.columns)
+
+    # Drop the 'overall_profit_72' column if it exists
+    if 'overall_profit_72' in df_scaled.columns:
+        df_scaled = df_scaled.drop('overall_profit_72', axis=1)
+
+    # Use the model to predict the score for this row
+    predicted_score = model.predict(df_scaled)
+
+    # Since the model's predict method returns an array, we take the first element
+    predicted_score = predicted_score[0]
+
+    return predicted_score
+
+def train_model(df):
+
+    # Fill missing values with the mean of the column
+    df.fillna(df.mean(), inplace=True)
+
+    # Remove outliers by capping at the 1st and 99th percentile
+    for col in df.columns:
+        df[col] = df[col].clip(df[col].quantile(0.01), df[col].quantile(0.99))
+
+    # Scale features
+    scaler = StandardScaler()
+    df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns)
+
+    # Assume that df_scaled is your training data and df_test_scaled is your test data
+    X_train = df_scaled.drop('overall_profit_72', axis=1)
+    y_train = df_scaled['overall_profit_72']
+    # X_test = df_test_scaled.drop('score', axis=1)
+
+    # Create the XGBoost regression model
+    # model = xgb.XGBRegressor(objective ='reg:squarederror', colsample_bytree = 0.3, learning_rate = 0.1, max_depth = 5, alpha = 10, n_estimators = 10, verbosity=2)
+
+    # Fit the model to the training data
+    # model.fit(X_train, y_train)
+    # training_score = model.score(X_train, y_train)
+    # print(f'Training score: {training_score}')
+
+    # Define the parameter grid for the grid search
+    param_grid = {
+        'colsample_bytree': [0.3, 0.5, 0.7],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'max_depth': [3, 5, 7],
+        'alpha': [1, 10, 100],
+        'n_estimators': [10, 50, 100]
+    }
+
+    # Create the XGBoost regression model
+    model = xgb.XGBRegressor(objective ='reg:squarederror', verbosity=2)
+
+    # Create the grid search object
+    grid_search = GridSearchCV(model, param_grid, cv=5)
+
+    # Fit the grid search to the data
+    grid_search.fit(X_train, y_train)
+
+    # Print the best parameters
+    print(f'Best parameters: {grid_search.best_params_}')
+
+    # Use the best model from the grid search
+    model = grid_search.best_estimator_
+
+    return model, scaler
 
 def rescore_only(file_name, train_data_length = 0.8):
     # Load df_params from the pickle file
     df_params = pd.read_pickle(file_name + '.pkl')
+
+    if 'score' in df_params.columns:
+        df_params = df_params.drop('score', axis=1)
 
     # Get the maximum number of hours in the data
     with open('historical_data.pkl', 'rb') as f:
@@ -358,23 +441,42 @@ def rescore_only(file_name, train_data_length = 0.8):
 
     pd.set_option('display.max_columns', None)
 
+    df_copy = df_params.copy()
+    # we need to drop some columns before sending it to the model
+    df_copy = df_copy.drop(['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'], axis=1)
+    df_copy['avg_profit_per_trade'] = df_copy['overall_profit_72'] / df_copy['trades']
+    df_copy['trades_per_day'] = df_copy['trades'] / (len(df_copy[list(df_copy.keys())[0]]) / 12 / 24)
+
+    '''
+    One limitation is that it treats each feature independently, meaning it doesn't consider interactions between features unless they're explicitly included in the data. 
+    If you believe that interactions between features like trades_per_day and overall_profit_72 are important, 
+    you might want to create a new feature that captures this interaction and include it in your data.
+    '''
+    # TODO add more features
+    df_copy['trades_profit_interaction'] = df_copy['trades_per_day'] * df_copy['overall_profit_72']
+    df_copy['open_positions_profit_interaction'] = df_copy['open_positions'] * df_copy['overall_profit_72']
+    df_copy['open_positions_trades_interaction'] = df_copy['open_positions'] * df_copy['trades']
+
+    # drop all columns where the profit can be seen
+    df_copy = df_copy.drop(['overall_profit_24'], axis=1)
+
+    model, scaler = train_model(df_copy)
+
     # Iterate over the rows of df_params
-    for index, row in df_params.iterrows():
+    for index, row in df_copy.iterrows():
         # Recalculate the score
-        if row['overall_profit_24'] <= 0:
+        if row['overall_profit_72'] <= 0:
             new_score = -1
         else:
-            new_score = calculate_score(row['overall_profit_24'], row['open_positions'], row['total_hours_24'], row['total_hours_72'], max_hours)
+            new_score = calculate_score(row, model, scaler)
 
         # Update the score in df_params
-        df_params.loc[index, 'score'] = new_score
+        df_params.loc[index, 'score'] = new_score * 1000
 
     df_params['score'] = df_params['score'].astype(int)
 
     # Sort df_params by the score
     df_params = df_params.sort_values(by='score', ascending=False)
-
-    print(df_params)
 
     # Save df_params back to the pickle file
     df_params.to_pickle(file_name + '.pkl')
@@ -517,12 +619,13 @@ def test(test_data, train_file_name, file_name):
 
     # Select the best row
     best_row = best_rows.loc[[best_row_index]]
+    print("Best row is:", best_row)
 
-    profit_margins = [df_params.iat[0, df_params.columns.get_loc('profit_margin')]]
-    min_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('min_percent_change_24')]]
-    min_percent_change_1 = [df_params.iat[0, df_params.columns.get_loc('min_percent_change_1')]]
-    max_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_24')]]
-    max_percent_change_1 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_1')]]
+    profit_margins = [best_row['profit_margin'].iloc[0]]
+    min_percent_change_24 = [best_row['min_percent_change_24'].iloc[0]]
+    min_percent_change_1 = [best_row['min_percent_change_1'].iloc[0]]
+    max_percent_change_24 = [best_row['max_percent_change_24'].iloc[0]]
+    max_percent_change_1 = [best_row['max_percent_change_1'].iloc[0]]
     
     print("Best row index is:", best_row['original_index'].iloc[0], " - Testing with profit margin", profit_margins, "and min_percent_change_24", min_percent_change_24, "and min_percent_change_1", min_percent_change_1, "and max_percent_change_24", max_percent_change_24, "and max_percent_change_1", max_percent_change_1)
 
@@ -558,7 +661,7 @@ async def main(rerun, rescore, show, args):
     global this_row_count
 
     if rescore:
-        rescore_only(args, args.based_on)
+        rescore_only(args.based_on)
         exit()
     elif show > -1:
         show_only(show, args.based_on)

@@ -69,7 +69,7 @@ the dry_run should work for avoiding trades, but do not rely on it!!!
 And start the trading:
 
 ```bash
-python3 trading.py"
+python3 trading.py
 ```
 
 ## License
