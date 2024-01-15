@@ -4,4 +4,9 @@
 __pycache__
 data
 *.bak
+
+# Ignore all .png files
 *.png
+
+# But don't ignore .png files in the readme_images directory
+!/readme_images/*.png

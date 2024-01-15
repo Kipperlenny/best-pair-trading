@@ -11,6 +11,7 @@ import requests
 import numpy as np
 from plot import create_plots
 from concurrent.futures import ProcessPoolExecutor
+from helper import filter_similar_and_get_best_rows, get_best_index
 
 # Load the .env file
 load_dotenv()
@@ -34,7 +35,7 @@ weight_total_hours_24 = 0.03
 weight_total_hours_72 = 1
 
 # Initialize the global variable outside the function (do not change)
-this_row_count = 0
+this_row_count = 1
 
 async def download_historical_data(client, pairs, start_time, interval='5m'):
     data = {}
@@ -508,29 +509,14 @@ def test(test_data, train_file_name, file_name):
         print(train_file_name + '.pkl does not exist, run the train first!')
         exit()
 
-    # first remove duplicates on score and overall_profit_24
-    df_params = df_params.drop_duplicates(subset=['score', 'overall_profit_24'])
+    # df_params is your DataFrame
+    df_params, best_rows = filter_similar_and_get_best_rows(df_params)
 
-    # Reset the index of df_params
-    # df_params = df_params.reset_index(drop=True)
+    # Get the best index
+    best_row_index, middle_point = get_best_index(best_rows)
 
-    # Round 'open_positions' and 'overall_profit_24' to 2 decimal places
-    df_params['open_positions_rounded'] = df_params['open_positions'].round(2)
-    df_params['overall_profit_24_rounded'] = df_params['overall_profit_24'].round(2)
-
-    # Filter rows with positive 'overall_profit_24_rounded'
-    df_params = df_params[df_params['overall_profit_24_rounded'] > 0]
-
-    # Group by 'open_positions_rounded' and 'overall_profit_24_rounded', and keep only the row with the highest score in each group
-    df_params = df_params.loc[df_params.groupby(['open_positions_rounded', 'overall_profit_24_rounded'])['score'].idxmax()]
-
-    df_params = df_params.nlargest(20, 'score')
-    df_params = df_params.sort_values(by='overall_profit_24_rounded', ascending=False)
-
-    # Get the index of the best row
-    best_row_index = df_params.index[0]
-
-    df_params = df_params.iloc[0:1]
+    # Select the best row
+    best_row = best_rows.loc[[best_row_index]]
 
     profit_margins = [df_params.iat[0, df_params.columns.get_loc('profit_margin')]]
     min_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('min_percent_change_24')]]
@@ -538,7 +524,7 @@ def test(test_data, train_file_name, file_name):
     max_percent_change_24 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_24')]]
     max_percent_change_1 = [df_params.iat[0, df_params.columns.get_loc('max_percent_change_1')]]
     
-    print("Best row index is:", best_row_index, " - Testing with profit margin", profit_margins, "and min_percent_change_24", min_percent_change_24, "and min_percent_change_1", min_percent_change_1, "and max_percent_change_24", max_percent_change_24, "and max_percent_change_1", max_percent_change_1)
+    print("Best row index is:", best_row['original_index'].iloc[0], " - Testing with profit margin", profit_margins, "and min_percent_change_24", min_percent_change_24, "and min_percent_change_1", min_percent_change_1, "and max_percent_change_24", max_percent_change_24, "and max_percent_change_1", max_percent_change_1)
 
     # Filter the candle and pair data
     candle_data, pair_data = filter_candle_and_pair_data(test_data, min_percent_change_24[0], min_percent_change_1[0], max_percent_change_24[0], max_percent_change_1[0])
@@ -548,16 +534,25 @@ def test(test_data, train_file_name, file_name):
         return
 
     test_params, sum_rows = create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, False)
-
-    test_params['score'] = df_params.iat[0, df_params.columns.get_loc('score')]
+    
+    # we need to check if best_row_index is present in test_params and the same like we have now
+    if not test_params.empty and 'best_row_index' in test_params.columns and best_row['original_index'].iloc[0] != test_params.iat[0, test_params.columns.get_loc('best_row_index')]:
+        print("best_row_index is present in test_params and DIFFERENT like we have now, so we need to recalculate the test_params")
+        test_params, sum_rows = create_or_get_params_file(file_name, profit_margins, min_percent_change_24, min_percent_change_1, max_percent_change_24, max_percent_change_1, True)
 
     # Now run this row on the test data and output the results
     test_params.apply(calculation, args=(file_name, sum_rows, candle_data, pair_data, test_params, False), axis=1, result_type='expand')
+
+    test_params['score'] = df_params.iat[0, df_params.columns.get_loc('score')]
+    test_params['best_row_index'] = best_row['original_index'].iloc[0]
+    test_params['trades_per_day'] = test_params['trades'] / (len(test_data[list(test_data.keys())[0]]) / 12 / 24)
 
     best_row = test_params.iloc[0]
 
     print(f"The profit is {best_row['overall_profit_24']} on the test data")
     print(best_row)
+
+    test_params.to_pickle(file_name + ".pkl")
 
 async def main(rerun, rescore, show, args):
     global this_row_count
@@ -625,21 +620,21 @@ async def main(rerun, rescore, show, args):
     # hyperopt on the train data
     print("Hyperopting on the train data")
     train(train_data, file_name + '_train', rerun, args)
-    this_row_count = 0
+    this_row_count = 1
 
     # we now need to score each result
     print("Score the results")
     rescore_only(file_name + '_train', train_test_split)
 
-    # plot the results
-    print("Plot the results")
-    df_params = pd.read_pickle(file_name + "_train.pkl")
-    create_plots(df_params, filename_friendly_from + "_" + filename_friendly_to)
-
     # score on the test data
     print("Test our best row on the test data")
     test(test_data, file_name + '_train', file_name + '_test')
-    this_row_count = 0
+    this_row_count = 1
+
+    # plot the results
+    print("Plot the results")
+    df_params = pd.read_pickle(file_name + "_train.pkl")
+    create_plots(df_params, filename_friendly_from + "_" + filename_friendly_to, file_name + "_train.pkl")
 
     # Close the client session
     await client.close_connection()

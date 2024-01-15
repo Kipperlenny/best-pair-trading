@@ -42,7 +42,19 @@ It will download candle data from binance from 1. of october 2023 until today.
 It will split the data into 80% training and 20% test data.
 It will run with default parameters to find the best values for this data.
 
-Now you can check the plots and the result. If you like it, you need to change trading.py to add these new parameters:
+Now you can check the plots and the result.
+The plots are created automatically after the run, if you want to re-create them, just use this comand:
+
+```bash
+python3 plot.py --file_name df_params_2023-10-01_000459999000_2024-01-14_120459999000_train.pkl
+```
+
+Always use the "_train" File, the "_test" file will be automatically used, if available.
+The Plot will look like this:
+
+![Example Plot](readme_images/score_vs_overall_profit_24_2023-10-01_000459999000_2024-01-14_120459999000.png)
+
+If you like it, you need to change trading.py to add these new parameters:
 
 ```python
 min_percent_change_24 = 20
