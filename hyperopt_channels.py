@@ -104,7 +104,7 @@ def calculate_strategy(data, price_jump_threshold, last_price_treshold, rolling_
                 # calculate the sell value based on the number of units
                 sell_value = units_bought * sell_price
 
-                if sell_value > buy_price * float(wished_profit):
+                if sell_value > 1000 * float(wished_profit):
                     print("selling", order_pair, "at", sell_price)
                     result += sell_value - 1000  # subtract the initial investment
                     open_orders.remove(order)  # remove the order from open_orders
