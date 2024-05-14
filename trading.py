@@ -1,4 +1,5 @@
 import math
+import statistics
 from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
 import os
@@ -7,14 +8,17 @@ import requests
 import asyncio
 from itertools import islice
 import time
+import argparse
+import matplotlib.pyplot as plt
+import pandas as pd
 
-dry_run = False
+dry_run = True
 
-min_percent_change_24 = 20
-min_percent_change_1=0.5
-max_percent_change_24=50
-max_percent_change_1=2
-needed_profit = 1.03
+min_percent_change_24 = -20
+min_percent_change_1=-20
+max_percent_change_24=500
+max_percent_change_1=2000
+needed_profit = 1.01
 amount_for_order = 10
 
 # Load the .env file
@@ -112,6 +116,144 @@ def get_best_pair(pair_data):
 
     # Return the best pair, its 'close' price, and the 'open_time'
     return best_pair, pair_data[best_pair]
+
+def get_best_channel_pair(pair_data, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA', candles_data = None):
+
+    candles = {}
+    results = {pair: {'last_price': None, 'low_to_high': 0, 'std_dev': None, 'price_to_lower_band': None} for pair in list(pair_data.keys())}
+    transition_times = {}
+    finished = False
+    for pair in list(pair_data.keys()):
+        if finished:
+            # delete from pair_data
+            del pair_data[pair]
+            continue
+
+        # get the last 7 days of data
+        if not pair in candles_data:
+            # get the 1000 candles from candles_data
+            if len(candles_data[pair]) >= 1000:
+                candles[pair] = candles_data[pair][-1000:]  # get the last 1000 candles
+            else:
+                print(f"Warning: Less than 1000 candles available for {pair}")
+                candles[pair] = candles_data[pair]
+        else:
+            candles[pair] = requests.get(f'https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=1000').json()
+
+        # get close price from last candle:
+        last_price = float(candles[pair][-1][4])
+
+        # Convert the candles to a DataFrame for easier calculations
+        df = pd.DataFrame(candles[pair], columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
+        df['Close'] = df['Close'].astype(float)
+
+        # Calculate the price jump
+        price_jump = df['Close'].max() - df['Close'].min()
+
+        # Calculate the threshold as 10% of the minimum price
+        threshold = price_jump_threshold * df['Close'].min()
+
+        # Skip this pair if the price jump is too big
+        if price_jump > threshold:
+            # delete from pair_data
+            del pair_data[pair]
+            print(f"Price jump too big for {pair}, skipping...")
+            continue
+
+        # Calculate the moving average and standard deviation of the closing prices
+        if moving_average_type == 'SMA':
+            df['MA'] = df['Close'].rolling(window=rolling_window_number).mean()
+        elif moving_average_type == 'EMA':
+            df['MA'] = df['Close'].ewm(span=rolling_window_number, adjust=False).mean()
+
+        df['STD'] = df['Close'].rolling(window=rolling_window_number).std()
+
+        # Calculate the upper and lower Bollinger Bands
+        df['UpperBB'] = df['MA'] + std_for_BB * df['STD']
+        df['LowerBB'] = df['MA'] - std_for_BB * df['STD']
+
+        # If the last price is near the upper Bollinger Band, delete the pair from pair_data
+        if abs(last_price - df['UpperBB'].iloc[-1]) < last_price_treshold:
+            del pair_data[pair]
+            print(f"Last price near upper Bollinger Band for {pair}, skipping...")
+            continue
+
+        # Initialize a list to store the times of each transition
+        transition_times[pair] = []
+
+        prev_state = None
+        for i, row in df.iterrows():
+            close_price = row['Close']
+            if close_price >= row['UpperBB']:
+                if prev_state == 'low':
+                    # Record the time of this transition
+                    transition_times[pair].append(i)
+                prev_state = 'high'
+            elif close_price <= row['LowerBB']:
+                prev_state = 'low'
+
+        # Now, 'transition_times' contains the times of each low-to-high transition
+
+        # Calculate the standard deviation of the transition times
+        std_dev = statistics.stdev(transition_times[pair]) if len(transition_times[pair]) > 1 else 0
+
+        # Save data to row
+        results[pair]['last_price'] = last_price
+        results[pair]['low_to_high'] = len(transition_times[pair])
+        results[pair]['std_dev'] = std_dev
+        results[pair]['price_to_lower_band'] = abs(last_price - df['LowerBB'].iloc[-1])
+
+        # print(pair, len(transition_times[pair]), std_dev)
+
+        if len(transition_times[pair]) > 5:
+            # to avoid errors, we have to remove all remaining pairs from pair_data
+            finished = True
+
+    # Sort the pairs based on the number of low-to-high transitions and the standard deviation
+    sorted_pairs = sorted(results.items(), key=lambda x: (-x[1]['low_to_high'], x[1]['std_dev'], x[1]['price_to_lower_band']))
+
+    # Check if sorted_pairs is empty
+    if not sorted_pairs:
+        print("No pairs left after filtering.")
+        return None
+
+    '''# Plot the best pair
+
+    # get the pair symbold, which is the key of the first element in the sorted_pairs list
+    pair = sorted_pairs[0][0]
+    plt.figure()
+
+    # Plot the closing prices
+    closing_prices = [float(candle[4]) for candle in candles[pair]]
+    plt.plot(closing_prices, label='Closing prices')
+
+    # Plot the Bollinger Bands
+    plt.plot(df['UpperBB'], label='Upper Bollinger Band', linestyle='--')
+    plt.plot(df['LowerBB'], label='Lower Bollinger Band', linestyle='--')
+
+    # Plot the transitions
+    for transition_time in transition_times[pair]:
+        plt.plot(transition_time, closing_prices[transition_time], 'ro')
+
+    # Add labels and title
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.title(f'Price channel and transitions for {pair}')
+
+    # Add a legend
+    plt.legend()
+
+    # Save the plot as an image file
+    plt.savefig(f'best_plot.png')
+
+    print(sorted_pairs[0])
+    exit(0)'''
+
+    # Now sorted_pairs is a list of pairs sorted by the number of low-to-high transitions in descending order
+    # and the standard deviation in ascending order
+
+    # Get the pair with the highest number of low-to-high transitions and the lowest standard deviation, return the pair symbol only
+    return sorted_pairs[0][0]
 
 async def place_order(client, pair, amount):
     if dry_run:
@@ -231,7 +373,7 @@ async def place_sell_order(client, pair, symbol, quantity, avg_price):
     )
     return order
 
-async def main():
+async def main(channel_trading):
 
     # Initialize the Binance client
     client = await AsyncClient.create(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_SECRET"))
@@ -244,25 +386,33 @@ async def main():
 
     usdt_pairs = {}
     for pair in all_pairs["symbols"]:
-        if pair['status'] == 'TRADING' and pair['quoteAsset'] == 'USDT' and 'SPOT' in pair['permissions']:
+        if pair['status'] == 'TRADING' and pair['quoteAsset'] == 'USDT' and any('SPOT' in subarray for subarray in pair['permissionSets']):
             # remove unneeded stuff from pair
             del pair['permissions']
+            del pair['permissionSets']
             del pair['allowedSelfTradePreventionModes']
             del pair['defaultSelfTradePreventionMode']
             usdt_pairs[pair['symbol']] = pair
+        # else:
+        #    print(pair['status'], pair['quoteAsset'], pair['permissionSets'])
 
     while True:
-        # Process the pairs for the 24h window
-        usdt_pairs = await process_pairs(client, usdt_pairs, semaphore, get_24h_window, 'priceChangePercent')
-
-        # only during testing
-        # usdt_pairs = dict(list(usdt_pairs.items())[:15])
-
-        # Process the pairs for the 1h window
-        usdt_pairs = await process_pairs(client, usdt_pairs, semaphore, get_1h_window, 'priceChangePercent1h')
 
         # get the best pair
-        best_pair = get_best_pair(usdt_pairs)
+        best_pair = None
+        if channel_trading:
+            best_pair = get_best_channel_pair(usdt_pairs)
+        else:
+            # Process the pairs for the 24h window, checks if positive price in the last 24 hours
+            usdt_pairs = await process_pairs(client, usdt_pairs, semaphore, get_24h_window, 'priceChangePercent')
+
+            # only during testing
+            # usdt_pairs = dict(list(usdt_pairs.items())[:15])
+
+            # Process the pairs for the 1h window, checks if positive price in the last 1 hour
+            usdt_pairs = await process_pairs(client, usdt_pairs, semaphore, get_1h_window, 'priceChangePercent1h')
+
+            best_pair = get_best_pair(usdt_pairs)
 
         if best_pair:
             symbol = best_pair[0]
@@ -308,6 +458,16 @@ async def main():
     await client.close_connection()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    # Create the parser
+    parser = argparse.ArgumentParser(description='hyperopting script')
+
+    # Add the arguments
+    parser.add_argument('--channel_trading', type=bool, default=False, required=False, help='wit this argument, the trading will be done on price channels instead of given parameters')
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    asyncio.run(main(args.channel_trading))
     # loop = asyncio.get_event_loop()
     # loop.run_until_complete(main())

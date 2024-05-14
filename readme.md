@@ -32,6 +32,14 @@ To do this, start the hyperopt:
 python3 hyperopt.py
 ```
 
+
+Or, if you want to use the price channel based way:
+
+```bash
+python3 hyperopt_channels.py
+```
+
+
 But a better way (because of replicating) is to use start and end candles. F.e.:
 
 ```bash
@@ -71,6 +79,8 @@ And start the trading:
 ```bash
 python3 trading.py
 ```
+
+you can try the new channel price trading with parameter --channel_trading True
 
 ## License
 

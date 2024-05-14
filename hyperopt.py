@@ -3,12 +3,15 @@ import argparse
 import pandas as pd
 import pickle
 from datetime import datetime, timedelta
+
+from tqdm import tqdm
 from binance import AsyncClient
 import asyncio
 import os
 from dotenv import load_dotenv
 import requests
 import numpy as np
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import GridSearchCV
 from plot import create_plots
 from concurrent.futures import ProcessPoolExecutor
@@ -41,33 +44,41 @@ weight_total_hours_72 = 1
 # Initialize the global variable outside the function (do not change)
 this_row_count = 1
 
-async def download_historical_data(client, pairs, start_time, interval='5m'):
+async def download_historical_data(client, pairs, start_time, interval='5m', file='historical_data.pkl'):
     data = {}
 
-    for pair in pairs:
+    for pair in tqdm(pairs):
         klines = await client.get_historical_klines(symbol=pair, interval=interval, start_str=start_time)
 
         # Convert the klines to a DataFrame
         df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
 
         # Convert the time columns to datetime
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        df['number_of_trades'] = df['number_of_trades'].astype(int)
+        df['volume'] = df['volume'].astype(float)
+        df['quote_asset_volume'] = df['quote_asset_volume'].astype(float)
+        df['taker_buy_base_asset_volume'] = df['taker_buy_base_asset_volume'].astype(float)
+        df['taker_buy_quote_asset_volume'] = df['taker_buy_quote_asset_volume'].astype(float)
+        df['open'] = df['open'].astype(float)
+        df['close'] = df['close'].astype(float)
         df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
         df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
 
         # Set the open time as the index
         df.set_index('open_time', inplace=True)
-        print(df)
         data[pair] = df
 
     # Save the data to a pickle file
-    with open('historical_data.pkl', 'wb') as f:
+    with open(file, 'wb') as f:
         pickle.dump(data, f)
 
     return data
 
-async def update_historical_data(client, pairs, interval='5m'):
+async def update_historical_data(client, pairs, interval='5m', file='historical_data.pkl'):
     # Load the historical data from the pickle file
-    with open('historical_data.pkl', 'rb') as f:
+    with open(file, 'rb') as f:
         data = pickle.load(f)
 
     # Get the current time
@@ -96,6 +107,16 @@ async def update_historical_data(client, pairs, interval='5m'):
 
             # Convert the klines to a DataFrame and append it to the existing data
             df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+            
+            df['high'] = df['high'].astype(float)
+            df['low'] = df['low'].astype(float)
+            df['number_of_trades'] = df['number_of_trades'].astype(int)
+            df['volume'] = df['volume'].astype(float)
+            df['quote_asset_volume'] = df['quote_asset_volume'].astype(float)
+            df['taker_buy_base_asset_volume'] = df['taker_buy_base_asset_volume'].astype(float)
+            df['taker_buy_quote_asset_volume'] = df['taker_buy_quote_asset_volume'].astype(float)
+            df['open'] = df['open'].astype(float)
+            df['close'] = df['close'].astype(float)
             df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
             df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
             df.set_index('open_time', inplace=True)
@@ -103,7 +124,7 @@ async def update_historical_data(client, pairs, interval='5m'):
 
     # Save the updated data to the pickle file
     if something_updated:
-        with open('historical_data.pkl', 'wb') as f:
+        with open(file, 'wb') as f:
             pickle.dump(data, f)
 
     return data
@@ -168,7 +189,7 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
     max_hours = len(first_df) // 12
 
     # Subtract 7 days from max_hours
-    sell_hours = min(72, int(max_hours * sell_period))
+    sell_hours = max(72, int(max_hours * sell_period))
     max_hours -= sell_hours
     over_24_hours = 0
     over_72_hours = 0
@@ -281,6 +302,8 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
                     print(best_pair_symbol, "for", open_time, "no sell time found")
                 overall_profit_24 -= 100 # penalty for not selling
                 over_72_hours += 1
+                total_hours_72 += sell_hours # not sould, we need to add something as penalty to total_hours
+                total_hours_24 += sell_hours
 
             if open_positions > max_open_positions:
                 max_open_positions = open_positions
@@ -327,7 +350,7 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
 
 '''
 1. Define the Problem: Clearly define what you want to predict.
---> In your case, you want to predict the 'score' of each strategy.
+--> Reduce the risk but keep a good profit margin
 
 2. Feature Selection: Identify the features that could potentially be used for prediction.
 --> In your case, these could be 'overall_profit_24', 'open_positions', 'total_hours_24', 'total_hours_72', and 'max_total_hours'. You might also want to consider other features that could be relevant.
@@ -349,76 +372,51 @@ def calculation(row, file_name, sum_rows, candle_data, pair_data, df_params, rer
 
 9. Predict Scores: Once you're happy with your model's performance, you can use it to predict the 'score' of each strategy.
 '''
-def calculate_score(row, model, scaler):
-    # Create a dataframe from the row
-    df = pd.DataFrame([row])
+def calculate_score(df, model):
 
-    # Scale features
-    df_scaled = pd.DataFrame(scaler.transform(df), columns=df.columns)
-
-    # Drop the 'overall_profit_72' column if it exists
-    if 'overall_profit_72' in df_scaled.columns:
-        df_scaled = df_scaled.drop('overall_profit_72', axis=1)
+    # Keep only the 'priceChangePercent' and 'priceChangePercent1h' columns
+    df = df[['priceChangePercent', 'priceChangePercent1h']]
 
     # Use the model to predict the score for this row
-    predicted_score = model.predict(df_scaled)
+    predicted_score = model.predict(df)
 
     # Since the model's predict method returns an array, we take the first element
     predicted_score = predicted_score[0]
 
     return predicted_score
 
-def train_model(df):
+def train_model(pair_data):
 
-    # Fill missing values with the mean of the column
-    df.fillna(df.mean(), inplace=True)
+    pairs = {}
+    for pair, df in pair_data.items():
+        # for every df we have to calculate the priceChangePercent and priceChangePercent1h for every candle
+        df['close'] = df['close'].astype(float)
 
-    # Remove outliers by capping at the 1st and 99th percentile
-    for col in df.columns:
-        df[col] = df[col].clip(df[col].quantile(0.01), df[col].quantile(0.99))
+        df['priceChangePercent'] = (df['close'].shift(12).pct_change(periods=288) * 100).round(2)
+        df['priceChangePercent1h'] = (df['close'].pct_change(periods=12).round(3) * 100).round(2)
+        # Drop rows where 'priceChangePercent' or 'priceChangePercent1h' is NaN
+        df = df.dropna(subset=['priceChangePercent', 'priceChangePercent1h'])
 
-    # Scale features
-    scaler = StandardScaler()
-    df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns)
+        pairs[pair] = df
 
-    # Assume that df_scaled is your training data and df_test_scaled is your test data
-    X_train = df_scaled.drop('overall_profit_72', axis=1)
-    y_train = df_scaled['overall_profit_72']
-    # X_test = df_test_scaled.drop('score', axis=1)
+    # Concatenate all dataframes into one large dataframe
+    df = pd.concat([df.assign(pair=pair) for pair, df in pairs.items()])
 
-    # Create the XGBoost regression model
-    # model = xgb.XGBRegressor(objective ='reg:squarederror', colsample_bytree = 0.3, learning_rate = 0.1, max_depth = 5, alpha = 10, n_estimators = 10, verbosity=2)
+    # Calculate the price change over the next 24 hours
+    df['future_priceChangePercent24h'] = df['priceChangePercent'].shift(-24)
 
-    # Fit the model to the training data
-    # model.fit(X_train, y_train)
-    # training_score = model.score(X_train, y_train)
-    # print(f'Training score: {training_score}')
+    # Drop rows where 'future_priceChangePercent24h' is NaN
+    df = df.dropna(subset=['future_priceChangePercent24h'])
 
-    # Define the parameter grid for the grid search
-    param_grid = {
-        'colsample_bytree': [0.3, 0.5, 0.7],
-        'learning_rate': [0.01, 0.1, 0.2],
-        'max_depth': [3, 5, 7],
-        'alpha': [1, 10, 100],
-        'n_estimators': [10, 50, 100]
-    }
+    # Prepare your features and target
+    X_train = df[['priceChangePercent', 'priceChangePercent1h']]
+    y_train = df['future_priceChangePercent24h']
 
-    # Create the XGBoost regression model
-    model = xgb.XGBRegressor(objective ='reg:squarederror', verbosity=2)
+    # Create and train the model
+    model = xgb.XGBRegressor(objective ='reg:squarederror', colsample_bytree = 0.3, learning_rate = 0.1, max_depth = 5, alpha = 10, n_estimators = 10, verbosity=2)
+    model.fit(X_train, y_train)
 
-    # Create the grid search object
-    grid_search = GridSearchCV(model, param_grid, cv=5)
-
-    # Fit the grid search to the data
-    grid_search.fit(X_train, y_train)
-
-    # Print the best parameters
-    print(f'Best parameters: {grid_search.best_params_}')
-
-    # Use the best model from the grid search
-    model = grid_search.best_estimator_
-
-    return model, scaler
+    return model
 
 def rescore_only(file_name, train_data_length = 0.8):
     # Load df_params from the pickle file
@@ -431,52 +429,34 @@ def rescore_only(file_name, train_data_length = 0.8):
     with open('historical_data.pkl', 'rb') as f:
         data = pickle.load(f)
 
-    first_df = next(iter(data.values()))
-    max_hours = int(len(first_df) * train_data_length) // 12
-
-    # Subtract 7 days from max_hours
-    max_hours -= int(max_hours * sell_period)
-
-    max_hours *= len(data.keys())
-
     pd.set_option('display.max_columns', None)
 
-    df_copy = df_params.copy()
-    # we need to drop some columns before sending it to the model
-    df_copy = df_copy.drop(['profit_margin', 'min_percent_change_24', 'min_percent_change_1', 'max_percent_change_24', 'max_percent_change_1'], axis=1)
-    df_copy['avg_profit_per_trade'] = df_copy['overall_profit_72'] / df_copy['trades']
-    df_copy['trades_per_day'] = df_copy['trades'] / (len(df_copy[list(df_copy.keys())[0]]) / 12 / 24)
+    model = train_model(data)
 
-    '''
-    One limitation is that it treats each feature independently, meaning it doesn't consider interactions between features unless they're explicitly included in the data. 
-    If you believe that interactions between features like trades_per_day and overall_profit_72 are important, 
-    you might want to create a new feature that captures this interaction and include it in your data.
-    '''
-    # TODO add more features
-    df_copy['trades_profit_interaction'] = df_copy['trades_per_day'] * df_copy['overall_profit_72']
-    df_copy['open_positions_profit_interaction'] = df_copy['open_positions'] * df_copy['overall_profit_72']
-    df_copy['open_positions_trades_interaction'] = df_copy['open_positions'] * df_copy['trades']
+    # set the score and rfr_score of all rows to -1
+    df_params['score'] = -1
 
-    # drop all columns where the profit can be seen
-    df_copy = df_copy.drop(['overall_profit_24'], axis=1)
+    # Calculate a score for each pair and take the average
+    # Loop over the rows in df_params
+    for index, row in df_params.iterrows():
+        scores = []
+        for pair in data:
+            print(f"Pair: {pair}")
+            print(f"Data: {data[pair]}")
+            score = calculate_score(data[pair], model)
+            print(f"Score: {score}")
+            scores.append(score)
+        average_score = sum(scores) / len(scores)
 
-    model, scaler = train_model(df_copy)
-
-    # Iterate over the rows of df_params
-    for index, row in df_copy.iterrows():
-        # Recalculate the score
-        if row['overall_profit_72'] <= 0:
-            new_score = -1
-        else:
-            new_score = calculate_score(row, model, scaler)
-
-        # Update the score in df_params
-        df_params.loc[index, 'score'] = new_score * 1000
+        # Update the score in df_params for the current strategy
+        df_params.loc[index, 'score'] = int(average_score * 1000)
 
     df_params['score'] = df_params['score'].astype(int)
 
     # Sort df_params by the score
     df_params = df_params.sort_values(by='score', ascending=False)
+
+    print(df_params)
 
     # Save df_params back to the pickle file
     df_params.to_pickle(file_name + '.pkl')
@@ -601,7 +581,7 @@ def train(train_data, file_name, rerun = False, args = {}):
     # Apply the hyperopt function to df_params
     df_params.apply(calculation, args=(file_name, sum_rows, candle_data, pair_data, df_params, rerun), axis=1, result_type='expand')
 
-def test(test_data, train_file_name, file_name):
+def test(test_data, train_file_name, file_name, days):
 
     # Check if df_params.pkl exists
     if os.path.exists(train_file_name + '.pkl'):
@@ -648,7 +628,7 @@ def test(test_data, train_file_name, file_name):
 
     test_params['score'] = df_params.iat[0, df_params.columns.get_loc('score')]
     test_params['best_row_index'] = best_row['original_index'].iloc[0]
-    test_params['trades_per_day'] = test_params['trades'] / (len(test_data[list(test_data.keys())[0]]) / 12 / 24)
+    test_params['trades_per_day'] = test_params['trades'] / (days - (max(72, int((days*24) * sell_period))/24))
 
     best_row = test_params.iloc[0]
 
@@ -675,7 +655,7 @@ async def main(rerun, rescore, show, args):
 
     usdt_pairs = {}
     for pair in all_pairs["symbols"]:
-        if pair['status'] == 'TRADING' and pair['quoteAsset'] == 'USDT' and 'SPOT' in pair['permissions']:
+        if pair['status'] == 'TRADING' and pair['quoteAsset'] == 'USDT' and any('SPOT' in subarray for subarray in pair['permissionSets']):
             # remove unneeded stuff from pair
             del pair['permissions']
             del pair['allowedSelfTradePreventionModes']
@@ -711,8 +691,8 @@ async def main(rerun, rescore, show, args):
         train_data[pair] = data[pair].iloc[:train_size]
         test_data[pair] = data[pair].iloc[train_size:]
 
-    print("train_data", len(train_data), "from", list(train_data.values())[0].iloc[0]["close_time"], "to", list(train_data.values())[0].iloc[-1]["close_time"])
-    print("test_data", len(test_data), "from", list(test_data.values())[0].iloc[0]["close_time"], "to", list(test_data.values())[0].iloc[-1]["close_time"])
+    print("train_data", len(train_data), "from", list(train_data.values())[0].iloc[0]["close_time"], "to", list(train_data.values())[0].iloc[-1]["close_time"], "days", (list(train_data.values())[0].iloc[-1]["close_time"] - list(train_data.values())[0].iloc[0]["close_time"]).days)
+    print("test_data", len(test_data), "from", list(test_data.values())[0].iloc[0]["close_time"], "to", list(test_data.values())[0].iloc[-1]["close_time"], "days", (list(test_data.values())[0].iloc[-1]["close_time"] - list(test_data.values())[0].iloc[0]["close_time"]).days)
 
     filename_friendly_from = list(data.values())[0].iloc[0]["close_time"].strftime("%Y-%m-%d_%H%M%S%f")
     filename_friendly_to = list(data.values())[0].iloc[-1]["close_time"].strftime("%Y-%m-%d_%H%M%S%f")
@@ -731,7 +711,7 @@ async def main(rerun, rescore, show, args):
 
     # score on the test data
     print("Test our best row on the test data")
-    test(test_data, file_name + '_train', file_name + '_test')
+    test(test_data, file_name + '_train', file_name + '_test', (list(test_data.values())[0].iloc[-1]["close_time"] - list(test_data.values())[0].iloc[0]["close_time"]).days)
     this_row_count = 1
 
     # plot the results
