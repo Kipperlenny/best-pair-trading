@@ -161,7 +161,10 @@ def train(pairs, start_time, end_time, directory, file_name, args):
         for pair in pairs:
             data = load_month_data(pair, start_month, directory)
             if data is not None:
-                train_data[pair] = data
+                if pair not in train_data:
+                    train_data[pair] = data
+                else:
+                    train_data[pair] = pd.concat([train_data[pair], data])
         start_month += relativedelta(months=1)
 
     # Initialize the best score and best parameters
