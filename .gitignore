@@ -10,3 +10,7 @@ data
 
 # But don't ignore .png files in the readme_images directory
 !/readme_images/*.png
+
+.venv
+historical_data
+historical_channel_data

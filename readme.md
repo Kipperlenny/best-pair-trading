@@ -25,7 +25,15 @@ pip install -r requirements.txt
 
 ## Usage
 
-The script can run without any parameters. But it needs to fill up some candle data etc. on your machine first.
+The main branch is now optimized for price channels (Bollinger Bands). Run it with:
+
+```bash
+python hyperopt_channels.py --start_candle "2024-01-01 00:00" --end_candle "2024-04-30 23:59
+```
+
+or similar times to hyperopt the best parameters for you.
+
+The AI model version is still available: the script can run without any parameters. But it needs to fill up some candle data etc. on your machine first.
 To do this, start the hyperopt:
 
 ```bash
@@ -54,7 +62,21 @@ The Plot will look like this:
 
 ![Example Plot](readme_images/score_vs_overall_profit_24_2023-10-01_000459999000_2024-01-14_120459999000.png)
 
-If you like it, you need to change trading.py to add these new parameters:
+
+The new channel price trading is started with:
+
+
+```bash
+python3 trading.py --channel_trading True
+```
+Parameters for this method are set in function parameters:
+
+```python
+def get_best_channel_pair(pair_data, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA', low_to_high_threshold = 10, std_dev_threshold = 20, candles_data = None):
+```
+
+
+Old AI version: If you like it, you need to change trading.py to add these new parameters:
 
 ```python
 min_percent_change_24 = 20
@@ -69,7 +91,7 @@ the dry_run should work for avoiding trades, but do not rely on it!!!
 And start the trading:
 
 ```bash
-python3 trading.py"
+python3 trading.py
 ```
 
 ## License
