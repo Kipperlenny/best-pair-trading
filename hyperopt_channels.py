@@ -14,6 +14,7 @@ from historic_data import is_data_up_to_date, load_month_data
 from plot import create_plots
 from hyperopt import update_historical_data, download_historical_data, create_or_get_params_file, calculation, filter_candle_and_pair_data
 from trading import get_best_channel_pair
+from gridsearch import gridsearch
 
 # parameters to hyperopt
 price_jump_threshold_range = np.arange(0.05, 0.15, 0.01)
@@ -265,7 +266,10 @@ async def main(args):
 
     # hyperopt on the train data
     print("Hyperopting on the train data")
-    best_params = train(usdt_pairs, train_start_datetime, train_end_datetime, 'historical_channel_data', file_name + '_train', args)
+    if args.gridsearch:
+        best_params = gridsearch(usdt_pairs, train_start_datetime, train_end_datetime, 'historical_channel_data')
+    else:
+        best_params = train(usdt_pairs, train_start_datetime, train_end_datetime, 'historical_channel_data', file_name + '_train', args)
 
     # test params on test data
     # print("Testing params on test data")
@@ -282,6 +286,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--start_candle', type=str, default="", required=False, help='Start candle in the format "YYYY-MM-DD HH:MM" for the whole data')
     parser.add_argument('--end_candle', type=str, default="", required=False, help='End candle in the format "YYYY-MM-DD HH:MM" for the whole data')
+    parser.add_argument('--gridsearch', type=bool, default=False, required=False, help='Try gridsearch instead of bruteforce')
+
 
     # Parse the arguments
     args = parser.parse_args()

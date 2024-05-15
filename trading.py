@@ -117,128 +117,84 @@ def get_best_pair(pair_data):
     # Return the best pair, its 'close' price, and the 'open_time'
     return best_pair, pair_data[best_pair]
 
-def get_best_channel_pair(pair_data, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA', low_to_high_threshold = 10, std_dev_threshold = 20, candles_data = None):
+def get_candles(pair, candles_data):
+    if pair in candles_data:
+        if len(candles_data[pair]) >= 1000:
+            return candles_data[pair][-1000:]
+        else:
+            print(f"Warning: Less than 1000 candles available for {pair}")
+            return candles_data[pair]
+    else:
+        return requests.get(f'https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=1000').json()
 
-    candles = {}
-    results = {pair: {'last_price': None, 'low_to_high': 0, 'std_dev': None, 'mean_time': None, 'price_to_lower_band': None} for pair in list(pair_data.keys())}
-    transition_times = {}
-    finished = False
+def calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type):
+    if moving_average_type == 'SMA':
+        df['MA'] = df['Close'].rolling(window=rolling_window_number).mean()
+    elif moving_average_type == 'EMA':
+        df['MA'] = df['Close'].ewm(span=rolling_window_number, adjust=False).mean()
+
+    df['STD'] = df['Close'].rolling(window=rolling_window_number).std()
+    df['UpperBB'] = df['MA'] + std_for_BB * df['STD']
+    df['LowerBB'] = df['MA'] - std_for_BB * df['STD']
+
+    return df
+
+def calculate_transition_times(df):
+    transition_times = []
+    prev_state = None
+    for i, row in df.iterrows():
+        close_price = row['Close']
+        if close_price >= row['UpperBB']:
+            if prev_state == 'low':
+                transition_times.append(i)
+            prev_state = 'high'
+        elif close_price <= row['LowerBB']:
+            prev_state = 'low'
+    return transition_times
+
+# TODO this function is now only working for given candles, not for requesting new ones from binance!
+def get_best_channel_pair(all_data, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA', low_to_high_threshold = 10, std_dev_threshold = 20):
+    pair_list = all_data['pair'].unique()
+    results = {pair: {'last_price': None, 'low_to_high': 0, 'std_dev': None, 'mean_time': None, 'price_to_lower_band': None} for pair in pair_list}
     highest_transitions = 0
     highest_sdt_dev = 0
-    for pair in list(pair_data.keys()):
-        if finished:
-            # delete from pair_data
-            del pair_data[pair]
-            continue
 
-        # get the last 7 days of data
-        if not pair in candles_data:
-            # get the 1000 candles from candles_data
-            if len(candles_data[pair]) >= 1000:
-                candles[pair] = candles_data[pair][-1000:]  # get the last 1000 candles
-            else:
-                print(f"Warning: Less than 1000 candles available for {pair}")
-                candles[pair] = candles_data[pair]
-        else:
-            candles[pair] = requests.get(f'https://api.binance.com/api/v3/klines?symbol={pair}&interval=5m&limit=1000').json()
-
-        # get close price from last candle:
-        last_price = float(candles[pair][-1][4])
-
-        # Convert the candles to a DataFrame for easier calculations
-        df = pd.DataFrame(candles[pair], columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
-        df['Close'] = df['Close'].astype(float)
-
-        # Calculate the price jump
+    for pair in pair_list:
+        df = all_data[all_data['pair'] == pair].copy()
+        last_price = float(df.iloc[-1]['Close'])
         price_jump = df['Close'].max() - df['Close'].min()
-
-        # Calculate the threshold as 10% of the minimum price
         threshold = price_jump_threshold * df['Close'].min()
 
-        # Skip this pair if the price jump is too big
         if price_jump > threshold:
-            # delete from pair_data
-            del pair_data[pair]
-            # print(f"Price jump too big for {pair}, skipping...", df['Close'].max(), df['Close'].min())
+            del results[pair]
             continue
 
-        # Calculate the moving average and standard deviation of the closing prices
-        if moving_average_type == 'SMA':
-            df['MA'] = df['Close'].rolling(window=rolling_window_number).mean()
-        elif moving_average_type == 'EMA':
-            df['MA'] = df['Close'].ewm(span=rolling_window_number, adjust=False).mean()
+        df = calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type)
 
-        df['STD'] = df['Close'].rolling(window=rolling_window_number).std()
-
-        # Calculate the upper and lower Bollinger Bands
-        df['UpperBB'] = df['MA'] + std_for_BB * df['STD']
-        df['LowerBB'] = df['MA'] - std_for_BB * df['STD']
-
-        # If the last price is near the upper Bollinger Band, delete the pair from pair_data
         if abs(last_price - df['UpperBB'].iloc[-1]) < last_price_treshold:
-            del pair_data[pair]
-            # print(f"Last price near upper Bollinger Band for {pair}, skipping...")
+            del results[pair]
             continue
 
-        # Initialize a list to store the times of each transition
-        transition_times[pair] = []
+        transition_times = calculate_transition_times(df)
+        mean_time = statistics.mean(transition_times) if transition_times else 0
+        std_dev = statistics.stdev(transition_times) if len(transition_times) > 1 else 0
 
-        prev_state = None
-        for i, row in df.iterrows():
-            close_price = row['Close']
-            if close_price >= row['UpperBB']:
-                if prev_state == 'low':
-                    # Record the time of this transition
-                    transition_times[pair].append(i)
-                prev_state = 'high'
-            elif close_price <= row['LowerBB']:
-                prev_state = 'low'
-
-        # Now, 'transition_times' contains the times of each low-to-high transition
-
-        # Calculate the standard deviation of the transition times
-        mean_time = statistics.mean(transition_times[pair]) if transition_times[pair] else 0
-        std_dev = statistics.stdev(transition_times[pair]) if len(transition_times[pair]) > 1 else 0
-
-        # Save data to row
         results[pair]['last_price'] = last_price
-        results[pair]['low_to_high'] = len(transition_times[pair])
+        results[pair]['low_to_high'] = len(transition_times)
         results[pair]['std_dev'] = std_dev
         results[pair]['mean_time'] = mean_time
         results[pair]['price_to_lower_band'] = abs(last_price - df['LowerBB'].iloc[-1])
 
-        if highest_transitions < len(transition_times[pair]):
-            highest_transitions = len(transition_times[pair])
+        if highest_transitions < len(transition_times):
+            highest_transitions = len(transition_times)
         if highest_sdt_dev < std_dev:
             highest_sdt_dev = std_dev
 
-        # print(pair, len(transition_times[pair]), std_dev)
-
-        # if len(transition_times[pair]) > 5:
-            # to avoid errors, we have to remove all remaining pairs from pair_data
-            # finished = True
-
-    # Calculate mean transition time and add it to results
-    for pair in results:
-        if pair in transition_times:
-            results[pair]['mean_time'] = statistics.mean(transition_times[pair]) if transition_times[pair] else 0
-        else:
-            results[pair]['mean_time'] = 0
-
-    # Sort the pairs based on the number of low-to-high transitions, the standard deviation, and the mean transition time
     sorted_pairs = sorted(results.items(), key=lambda x: (-x[1]['low_to_high'], x[1]['std_dev'], x[1]['price_to_lower_band'], -x[1]['mean_time']))
 
-    # Check if sorted_pairs is empty
-    if not sorted_pairs:
-        # print("No pairs left after filtering.", highest_transitions, highest_sdt_dev, len(pair_data))
+    if not sorted_pairs or sorted_pairs[0][1]['low_to_high'] < low_to_high_threshold or sorted_pairs[0][1]['std_dev'] < std_dev_threshold:
         return None
 
-    # Check if best pair is above a needed transition threshold, std_dev threshold, and mean time threshold
-    if sorted_pairs[0][1]['low_to_high'] < low_to_high_threshold or sorted_pairs[0][1]['std_dev'] < std_dev_threshold:
-        # print("No pairs left after filtering for threshold.", highest_transitions, highest_sdt_dev, len(pair_data))
-        return None
-
-    # Get the pair with the highest number of low-to-high transitions and the lowest standard deviation, return the pair symbol only
     return sorted_pairs[0][0]
 
 async def place_order(client, pair, amount):
