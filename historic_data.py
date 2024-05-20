@@ -7,15 +7,27 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 from tqdm import tqdm
 
-def load_month_data(pair, month, directory='historical_data'):
-    file = os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}.pkl.gz')
+def load_month_data(pair, month, directory='historical_data', minimal = False):
+    if minimal and os.path.exists(os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}_minimal.pkl.gz')):
+        file = os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}_minimal.pkl.gz')
+    else:
+        file = os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}.pkl.gz')
     if os.path.exists(file):
         with gzip.open(file, 'rb') as f:
-            return pickle.load(f)
+            p = pickle.load(f)
+
+            if minimal:
+                if 'quote_asset_volume' in p: del p['quote_asset_volume']
+                if 'number_of_trades' in p: del p['number_of_trades']
+                if 'taker_buy_base_asset_volume' in p: del p['taker_buy_base_asset_volume']
+                if 'taker_buy_quote_asset_volume' in p: del p['taker_buy_quote_asset_volume']
+                if 'ignore' in p: del p['ignore']
+                
+            return p
     else:
         return None
 
-def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channel_data'):
+def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channel_data', minimal = False):
     start_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     end_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     not_up_to_date_pairs = []
@@ -26,7 +38,7 @@ def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channe
                 print(f"File for {pair} in {file} is missing.")
                 not_up_to_date_pairs.append(pair)
             else:
-                data = load_month_data(pair, start_month, directory)
+                data = load_month_data(pair, start_month, directory, minimal = minimal)
                 if data is None:
                     print(f"Data for {pair} in {start_month.strftime('%Y-%m')} is missing.")
                     not_up_to_date_pairs.append(pair)
@@ -39,7 +51,7 @@ def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channe
         start_month += relativedelta(months=1)
     return list(set(not_up_to_date_pairs))  # Remove duplicates
 
-async def download_historical_data(client, pairs, start_time, end_time, interval='5m', directory='historical_data', retries=3):
+async def download_historical_data(client, pairs, start_time, end_time, interval='5m', directory='historical_data', retries=3, minimal = False):
     os.makedirs(directory, exist_ok=True)
 
     for pair in tqdm(pairs):
@@ -70,11 +82,18 @@ async def download_historical_data(client, pairs, start_time, end_time, interval
                     df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
                     df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
 
+                    if minimal:
+                        if 'quote_asset_volume' in df: del df['quote_asset_volume']
+                        if 'number_of_trades' in df: del df['number_of_trades']
+                        if 'taker_buy_base_asset_volume' in df: del df['taker_buy_base_asset_volume']
+                        if 'taker_buy_quote_asset_volume' in df: del df['taker_buy_quote_asset_volume']
+                        if 'ignore' in df: del df['ignore']
+
                     # Set the open time as the index
                     df.set_index('open_time', inplace=True)
 
                     # Save the data to a compressed pickle file
-                    file = os.path.join(directory, f'{pair}_{current_start_time.strftime("%Y_%m")}.pkl.gz')
+                    file = os.path.join(directory, f'{pair}_{current_start_time.strftime("%Y_%m")}{"_minimal" if minimal else ""}.pkl.gz')
                     with gzip.open(file, 'wb') as f:
                         pickle.dump(df, f)
 

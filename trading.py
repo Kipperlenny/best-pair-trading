@@ -11,6 +11,8 @@ import time
 import argparse
 import matplotlib.pyplot as plt
 import pandas as pd
+from cache import get_redis_server
+import hashlib
 
 dry_run = True
 
@@ -129,11 +131,11 @@ def get_candles(pair, candles_data):
 
 def calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type):
     if moving_average_type == 'SMA':
-        df['MA'] = df['Close'].rolling(window=rolling_window_number).mean()
+        df['MA'] = df['close'].rolling(window=rolling_window_number).mean()
     elif moving_average_type == 'EMA':
-        df['MA'] = df['Close'].ewm(span=rolling_window_number, adjust=False).mean()
+        df['MA'] = df['close'].ewm(span=rolling_window_number, adjust=False).mean()
 
-    df['STD'] = df['Close'].rolling(window=rolling_window_number).std()
+    df['STD'] = df['close'].rolling(window=rolling_window_number).std()
     df['UpperBB'] = df['MA'] + std_for_BB * df['STD']
     df['LowerBB'] = df['MA'] - std_for_BB * df['STD']
 
@@ -142,60 +144,120 @@ def calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_aver
 def calculate_transition_times(df):
     transition_times = []
     prev_state = None
-    for i, row in df.iterrows():
-        close_price = row['Close']
-        if close_price >= row['UpperBB']:
+    for row in df.itertuples():
+        close_price = getattr(row, 'close')
+        if close_price >= getattr(row, 'UpperBB'):
             if prev_state == 'low':
-                transition_times.append(i)
+                transition_times.append(row.Index)
             prev_state = 'high'
-        elif close_price <= row['LowerBB']:
+        elif close_price <= getattr(row, 'LowerBB'):
             prev_state = 'low'
     return transition_times
 
 # TODO this function is now only working for given candles, not for requesting new ones from binance!
-def get_best_channel_pair(all_data, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA', low_to_high_threshold = 10, std_dev_threshold = 20):
-    pair_list = all_data['pair'].unique()
-    results = {pair: {'last_price': None, 'low_to_high': 0, 'std_dev': None, 'mean_time': None, 'price_to_lower_band': None} for pair in pair_list}
+def get_best_channel_pair(all_data, pair_list, time, price_jump_threshold = 0.10, last_price_treshold = 0.50, rolling_window_number = 20, std_for_BB = 2, moving_average_type = 'SMA'):
+    r = get_redis_server()
+    
+    # Create a hash of the dataframe and the parameters
+    data_hash = hashlib.sha256(pd.util.hash_pandas_object(all_data, index=True).values).hexdigest()
+    params_hash = hashlib.sha256(str((pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)).encode()).hexdigest()
+    cache_key = data_hash + params_hash
+
+    # Check if the result is in the cache
+    result = r.get(cache_key)
+    if result is not None:
+        result = result.decode('utf-8')
+        if result == 'None':
+            result = None
+        return result
+
+    results = {pair: {'last_price': None, 'low_to_high': 0, 'std_dev': 0, 'mean_time': 0, 'price_to_lower_band': None} for pair in pair_list}
     highest_transitions = 0
     highest_sdt_dev = 0
 
     for pair in pair_list:
-        df = all_data[all_data['pair'] == pair].copy()
-        last_price = float(df.iloc[-1]['Close'])
-        price_jump = df['Close'].max() - df['Close'].min()
-        threshold = price_jump_threshold * df['Close'].min()
+
+        df = all_data[(all_data['pair'] == pair) & (all_data['open_time'] <= time)].tail(1000)
+
+        last_price = float(df.iloc[-1]['close'])
+        price_jump = df['close'].max() - df['close'].min()
+        threshold = price_jump_threshold * df['close'].min()
 
         if price_jump > threshold:
             del results[pair]
             continue
 
-        df = calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type)
+        # Shift the 'close' column by one row
+        df['prev_close'] = df['close'].shift(1)
 
-        if abs(last_price - df['UpperBB'].iloc[-1]) < last_price_treshold:
+        # Calculate the price jump for every two consecutive candles
+        df['price_jump'] = abs(df['open'] - df['prev_close'])
+
+        # Check if any price jump is too big
+        if any(df['price_jump'] > 0.25 * df['prev_close']):
             del results[pair]
             continue
 
+        # Use the cached Bollinger Bands if available, otherwise calculate them
+        # key = (pair, time, rolling_window_number, std_for_BB, moving_average_type)
+        # if key not in bollinger_bands_cache:
+        #     bollinger_bands_cache[key] = calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type)
+        # df = bollinger_bands_cache[key]
+        df = calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type)
+
+        # Normalize the last price and the Bollinger Bands
+        last_price_normalized = (last_price - df['LowerBB'].min()) / (df['UpperBB'].max() - df['LowerBB'].min())
+
+        if last_price_normalized <= last_price_treshold:
+            del results[pair]
+            continue
+
+        # key = (pair, time, last_price_treshold)
+        # if key not in calculate_transition_times_cache:
+        #     calculate_transition_times_cache[key] = calculate_transition_times(df)
+        # transition_times = calculate_transition_times_cache[key]
+        timeframe_days = (all_data['open_time'].max() - all_data['open_time'].min()).days
         transition_times = calculate_transition_times(df)
+
+        # Normalize the thresholds based on the timeframe
+        adjusted_low_to_high_threshold = timeframe_days * 0.25
+        adjusted_std_dev_threshold = timeframe_days * 0.25
+
         mean_time = statistics.mean(transition_times) if transition_times else 0
-        std_dev = statistics.stdev(transition_times) if len(transition_times) > 1 else 0
+
+        # Convert trade dates to numbers (e.g., "day number" in the timeframe)
+        trade_days = [trade_date.toordinal() for trade_date in df['open_time']]
+
+        # Calculate the standard deviation of the trade days
+        trade_days_std_dev = statistics.stdev(trade_days) if len(trade_days) > 1 else 0
+
+        # Store the standard deviation of the trade days in the results
+        results[pair]['trade_days_std_dev'] = trade_days_std_dev
 
         results[pair]['last_price'] = last_price
         results[pair]['low_to_high'] = len(transition_times)
-        results[pair]['std_dev'] = std_dev
         results[pair]['mean_time'] = mean_time
         results[pair]['price_to_lower_band'] = abs(last_price - df['LowerBB'].iloc[-1])
 
         if highest_transitions < len(transition_times):
             highest_transitions = len(transition_times)
-        if highest_sdt_dev < std_dev:
-            highest_sdt_dev = std_dev
+            print("new highest highest_transitions", pair, mean_time, highest_transitions)
+        if highest_sdt_dev < trade_days_std_dev:
+            highest_sdt_dev = trade_days_std_dev
+            print("new highest trade_days_std_dev", pair, mean_time, highest_sdt_dev)
 
-    sorted_pairs = sorted(results.items(), key=lambda x: (-x[1]['low_to_high'], x[1]['std_dev'], x[1]['price_to_lower_band'], -x[1]['mean_time']))
+    sorted_pairs = sorted(results.items(), key=lambda x: (-x[1]['low_to_high'], x[1]['trade_days_std_dev'], x[1]['price_to_lower_band'], -x[1]['mean_time']))
 
-    if not sorted_pairs or sorted_pairs[0][1]['low_to_high'] < low_to_high_threshold or sorted_pairs[0][1]['std_dev'] < std_dev_threshold:
-        return None
+    if not sorted_pairs or sorted_pairs[0][1]['low_to_high'] < adjusted_low_to_high_threshold or sorted_pairs[0][1]['trade_days_std_dev'] < adjusted_std_dev_threshold:
+        result = 'None'
+    else:
+        result = sorted_pairs[0][0]
+    
+    r.set(cache_key, result)
 
-    return sorted_pairs[0][0]
+    if result == 'None':
+        result = None
+    return result
 
 async def place_order(client, pair, amount):
     if dry_run:
