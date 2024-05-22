@@ -22,6 +22,7 @@ blacklist_pairs = [
     'USDCUSDT',
     'FDUSDUSDT',
     'TUSDUSDT',
+    'USDPUSDT',
 ]
 
 async def main(args):

@@ -1,0 +1,7 @@
+
+
+50 / 540 sells 21 result: 352.1268040171972 parameters: 0.1 0.1 5 1 SMA 1.01
+130 / 540 sells 9 result: 301.0851654804686 parameters: 0.2 0.1 5 1 SMA 1.01
+50 / 540 sells 18 result: 237.3689715051612 parameters: 0.1 0.1 5 1 SMA 1.01
+130 / 540 sells 27 result: 118.39961548268718 parameters: 0.1 0.1 10 2 SMA 1.01
+70 / 540 sells 14 result: 116.69491882121747 parameters: 0.1 0.1 10 1 SMA 1.01

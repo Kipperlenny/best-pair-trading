@@ -231,6 +231,13 @@ def get_best_channel_pair(all_data, cache_key, pair_list, time, price_jump_thres
             del results[pair]
             continue
 
+        # check if price difference is not too close all the time
+        if all(df['price_jump'] < 0.01 * df['prev_close']):
+            print("price_jump too small", pair, df['price_jump'].max())
+            del results[pair]
+            continue
+        
+
         df = calculate_bollinger_bands(df, rolling_window_number, std_for_BB, moving_average_type)
 
         # Normalize the last price and the Bollinger Bands
