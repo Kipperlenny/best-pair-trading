@@ -16,6 +16,11 @@ def load_month_data(pair, month, directory='historical_data', minimal = False):
         with gzip.open(file, 'rb') as f:
             p = pickle.load(f)
 
+            # Round 'open_time' and 'close_time' to the nearest minute
+            p.index = p.index.round('min')
+            if 'close_time' in p.columns:
+                p['close_time'] = p['close_time'].dt.round('min')
+
             if minimal:
                 if 'quote_asset_volume' in p: del p['quote_asset_volume']
                 if 'number_of_trades' in p: del p['number_of_trades']
@@ -33,7 +38,7 @@ def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channe
     not_up_to_date_pairs = []
     while start_month <= end_month:
         for pair in pairs:
-            file = os.path.join(directory, f'{pair}_{start_month.strftime("%Y_%m")}.pkl.gz')
+            file = os.path.join(directory, f'{pair}_{start_month.strftime("%Y_%m")}{"_minimal" if minimal else ""}.pkl.gz')
             if not os.path.exists(file):
                 print(f"File for {pair} in {file} is missing.")
                 not_up_to_date_pairs.append(pair)
@@ -42,12 +47,13 @@ def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channe
                 if data is None:
                     print(f"Data for {pair} in {start_month.strftime('%Y-%m')} is missing.")
                     not_up_to_date_pairs.append(pair)
-                if start_month == end_month:
-                    if data.iloc[-1]['close_time'] < end_time:
+                elif not data.empty:  # Check if data is not empty
+                    if start_month == end_month:
+                        if data.iloc[-1]['close_time'] < end_time:
+                            not_up_to_date_pairs.append(pair)
+                    elif data.iloc[-1]['close_time'] < start_month + relativedelta(months=1) - timedelta(minutes=5):
+                        print(f"Data for {pair} in {start_month.strftime('%Y-%m')} is not up to date.")
                         not_up_to_date_pairs.append(pair)
-                elif data.iloc[-1]['close_time'] < start_month + relativedelta(months=1) - timedelta(minutes=5):
-                    print(f"Data for {pair} in {start_month.strftime('%Y-%m')} is not up to date.")
-                    not_up_to_date_pairs.append(pair)
         start_month += relativedelta(months=1)
     return list(set(not_up_to_date_pairs))  # Remove duplicates
 
@@ -69,18 +75,20 @@ async def download_historical_data(client, pairs, start_time, end_time, interval
                     # Convert the klines to a DataFrame
                     df = pd.DataFrame(klines, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
 
-                    # Convert the time columns to datetime
+                    # Convert the time columns to datetime and round to the nearest minute
+                    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms').dt.round('min')
+                    df['close_time'] = pd.to_datetime(df['close_time'], unit='ms').dt.round('min')
+
+                    # Convert the other columns to their appropriate data types
                     df['high'] = df['high'].astype('float32')
                     df['low'] = df['low'].astype('float32')
                     df['number_of_trades'] = df['number_of_trades'].astype(int)
-                    df['volume'] = df['volume'].astype('float32')
+                    df['volume'] = df['volume'].astype(int)
                     df['quote_asset_volume'] = df['quote_asset_volume'].astype('float32')
                     df['taker_buy_base_asset_volume'] = df['taker_buy_base_asset_volume'].astype('float32')
                     df['taker_buy_quote_asset_volume'] = df['taker_buy_quote_asset_volume'].astype('float32')
                     df['open'] = df['open'].astype('float32')
                     df['close'] = df['close'].astype('float32')
-                    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-                    df['close_time'] = pd.to_datetime(df['close_time'], unit='ms')
 
                     if minimal:
                         if 'quote_asset_volume' in df: del df['quote_asset_volume']
@@ -151,7 +159,7 @@ async def update_historical_data(client, pairs, interval='5m', directory='histor
                     df['high'] = df['high'].astype('float32')
                     df['low'] = df['low'].astype('float32')
                     df['number_of_trades'] = df['number_of_trades'].astype(int)
-                    df['volume'] = df['volume'].astype('float32')
+                    df['volume'] = df['volume'].astype(int)
                     df['quote_asset_volume'] = df['quote_asset_volume'].astype('float32')
                     df['taker_buy_base_asset_volume'] = df['taker_buy_base_asset_volume'].astype('float32')
                     df['taker_buy_quote_asset_volume'] = df['taker_buy_quote_asset_volume'].astype('float32')

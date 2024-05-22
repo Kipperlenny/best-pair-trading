@@ -7,3 +7,4 @@ scikit-learn
 python-binance
 python-dotenv
 redis
+xxhash

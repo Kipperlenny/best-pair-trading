@@ -17,6 +17,12 @@ from gridsearch import gridsearch
 from cache import start_redis
 
 train_test_split = 0.8
+blacklist_pairs = [
+    'ADAUSDT',
+    'USDCUSDT',
+    'FDUSDUSDT',
+    'TUSDUSDT',
+]
 
 async def main(args):
 
@@ -47,7 +53,10 @@ async def main(args):
     end_time = int(end_candle.timestamp() * 1000) if end_candle else None
 
     # for testing, only use the first 5 pairs
-    usdt_pairs = dict(list(usdt_pairs.items())[:1]) # TODO: remove this line
+    # usdt_pairs = dict(list(usdt_pairs.items())[:50]) # TODO: remove this line
+
+    # filter blacklisted pairs from usdt_pairs
+    usdt_pairs = {k: v for k, v in usdt_pairs.items() if k not in blacklist_pairs}
 
     # Download the historical data
     not_up_to_date_pairs = is_data_up_to_date(usdt_pairs.keys(), start_candle, end_candle, 'historical_channel_data', minimal=True)
@@ -80,7 +89,7 @@ async def main(args):
     print(f"Test data: from {test_start_datetime} to {test_end_datetime}")
 
     # hyperopt on the train data
-    print("Hyperopting on the train data")
+    print("Hyperopting on the train data with", len(usdt_pairs), "pairs")
     best_params = gridsearch(usdt_pairs, train_start_datetime, train_end_datetime, 'historical_channel_data')
 
     # test params on test data

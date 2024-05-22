@@ -1,3 +1,7 @@
+from datetime import datetime, timedelta
+import itertools
+import os
+import pickle
 from sklearn.model_selection import ParameterGrid, TimeSeriesSplit
 from sklearn.base import BaseEstimator
 import pandas as pd
@@ -7,11 +11,11 @@ from historic_data import load_month_data
 import numpy as np
 from sklearn.model_selection import GridSearchCV
 from pandas.tseries.offsets import DateOffset
-from cache import dump, load
+from cache import create_data_hash, create_cache_key
 import sys
 import time as timemod
 from cache import get_redis_server
-import hashlib
+import xxhash
 
 # parameters to hyperopt
 '''price_jump_threshold_range = np.arange(0.05, 0.15, 0.01)
@@ -24,10 +28,10 @@ std_for_BB_range = np.arange(1, 3, 0.1)
 moving_average_type_range = ['SMA', 'EMA']'''
 
 price_jump_threshold_range = [0.02, 0.1, 0.2] # if price in one 5min candle jumps more than this percent, remove the pair from consideration
-last_price_treshold_range = [0.1, 0.25, 0.5] #np.arange(0.4, 0.6, 0.05) # if the last price is less than this percent of the lower BB, remove the pair from consideration
+last_price_treshold_range = [0.1, 0.25, 0.5] #np.arange(0.4, 0.6, 0.05) # if the last price is more than this percent of the lower BB, remove the pair from consideration
 wished_profit_range = [1.01] #np.arange(1.01, 1.05, 0.01)
 rolling_window_number_range = [2, 5, 10, 25, 50]
-std_for_BB_range = [2] #np.arange(1, 3, 0.5)
+std_for_BB_range = [1, 2, 3] #np.arange(1, 3, 0.5)
 moving_average_type_range = ['SMA', 'EMA']
 
 
@@ -85,47 +89,55 @@ class StrategyEstimator(BaseEstimator):
 def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit):
     r = get_redis_server()
     
-    # Create a hash of the dataframe and the parameters
-    grouped_data_hash = tuple((key, tuple(group.values)) for key, group in grouped_data)
-    grouped_data_hash = hashlib.sha256(str(grouped_data_hash).encode()).hexdigest()
+    grouped_data_hash = xxhash.xxh64(str(grouped_data)).hexdigest()
+    data_hash = create_data_hash(data)
+    params_hash = xxhash.xxh64(str((price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit))).hexdigest()
 
-    data_hash = hashlib.sha256(pd.util.hash_pandas_object(data, index=True).values).hexdigest()
+    cache_key = str(grouped_data_hash) + str(data_hash) + str(params_hash)
 
-    params_hash = hashlib.sha256(str((price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)).encode()).hexdigest()
-
-    cache_key = grouped_data_hash + data_hash + params_hash
-
+    start_time = timemod.time()
     # Check if the result is in the cache
     result = r.get(cache_key)
     if result is not None:
+        # print("Time taken for cache check: ", timemod.time() - start_time)
+        print(sys.stdout.get_line_count() * n_jobs, '/', max_jobs, 'cache result:', result, 'parameters:', price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)
         return float(result.decode('utf-8'))
     
-    # start_time = timemod.time()
     open_orders = []
+    sells = 0
     result = 0
     best_pair = None
 
+    # Convert grouped_data to a list
+    grouped_data_list = list(grouped_data)
+    last_time = grouped_data_list[-1][0]
+    first_time = grouped_data_list[0][0]
+
+    start_time = timemod.time()
+
+    # Now you can iterate over grouped_data_skipped
     for time, group in grouped_data:
+        # Skip the first 1000 entries (each entry is 5 minutes)
+        if time < first_time + timedelta(minutes=1000*5):
+            continue
+
         minute = time.minute
         hour = time.hour
         day = time.day
 
         # only check for buying every hour
         if minute < 5:
-            # start_time_inner = timemod.time()
-            #if hour == 0 and day % 6 == 0:
-            #    print("timestamp", group.iloc[0]["close_time"])
 
-            pair_list = data.loc[data['open_time'] == time, 'pair'].unique().tolist()
+            pair_list = data.loc[data['open_time'] == time, 'pair_hourly'].iloc[0]
 
-            best_pair = get_best_channel_pair(data, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
+            channel_pair_cache_key = create_cache_key(grouped_data_hash, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
+
+            best_pair = get_best_channel_pair(data, channel_pair_cache_key, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
             
-            # if timemod.time() - start_time_inner > 0.1:
-            #     print("Time taken for get_best_channel_pair: ", timemod.time() - start_time_inner)
+            # print("Time taken for get_best_channel_pair: ", timemod.time() - start_time_inner)
 
             if best_pair and best_pair is not None:
                 if not any(order_pair == best_pair for order_pair, _ in open_orders):
-                    # print("buying", best_pair, "at", float(group.loc[group['pair'] == best_pair].iloc[0]["close"]))
                     open_orders.append((best_pair, time))
 
         # start_time_inner = timemod.time()
@@ -133,9 +145,16 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
         for order in open_orders.copy():
             order_pair, buy_time = order
 
-            if time >= buy_time:
-                buy_price = float(data.loc[(data['open_time'] == buy_time) & (data['pair'] == order_pair)].iloc[0]["close"])
-                sell_price = float(data.loc[(data['open_time'] == time) & (data['pair'] == order_pair)].iloc[0]["close"])
+            if time > buy_time and time <= last_time:
+                buy_data = data.loc[(data['open_time'] == buy_time) & (data['pair'] == order_pair)]
+                sell_data = data.loc[(data['open_time'] == time) & (data['pair'] == order_pair)]
+
+                if buy_data.empty or sell_data.empty:
+                    open_orders.remove(order)
+                    continue
+
+                buy_price = float(buy_data.iloc[0]["close"])
+                sell_price = float(sell_data.iloc[0]["close"])
 
                 if buy_price == 0:
                     open_orders.remove(order)
@@ -145,46 +164,57 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
                 sell_value = units_bought * sell_price
 
                 if sell_value > 1000 * float(wished_profit) and (best_pair is None or order_pair != best_pair):
-                    # print("selling", order_pair, "at", sell_price)
                     result += sell_value - 1000
+                    sells += 1
                     open_orders.remove(order)
-                    break
 
-        # if timemod.time() - start_time_inner > 0.1:
-        #     print("Time taken for order processing: ", timemod.time() - start_time_inner)
-
-    # start_time_inner = timemod.time()
+    # print("Time taken for grouped_data_list: ", timemod.time() - start_time)
+    
     # after all candles have been processed, calculate the value of open positions
     for order in open_orders:
         order_pair, buy_time = order
 
-        # calculate the value of the position at the end of the trading period
-        buy_group = grouped_data.get_group(buy_time)
-        buy_value = float(buy_group[buy_group['pair'] == order_pair].iloc[0]["close"])
-        end_value = float(group[group['pair'] == order_pair].iloc[0]["close"])
+        try:
+            buy_group = grouped_data.get_group(buy_time)
+            buy_group = buy_group[buy_group['pair'] == order_pair]
+            end_group = group[group['pair'] == order_pair]
+        except KeyError:
+            continue
 
-        # calculate the number of units bought
+        if buy_group.empty or end_group.empty:
+            continue
+
+        buy_value = float(buy_group.iloc[0]["close"])
+        end_value = float(end_group.iloc[0]["close"])
+
         units_bought = 1000 / buy_value
-
-        # calculate the end value based on the number of units
         end_value_units = units_bought * end_value
 
-        # subtract the initial investment from the end value and add to result
-        # print("end selling", order_pair, "at", end_value)
+        sells += 1
         result += end_value_units - 1000
-    
-    #if timemod.time() - start_time_inner > 0.1:
-    #    print("Time taken for final calculations: ", timemod.time() - start_time_inner)
 
-    # print("Total time taken: ", timemod.time() - start_time)
-    print(sys.stdout.get_line_count() * n_jobs, '/', max_jobs, 'result:', result, 'parameters:', price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)
-    
-    
+    print(sys.stdout.get_line_count() * n_jobs, '/', max_jobs, 'sells', sells, 'result:', result, 'parameters:', price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)
+        
     r.set(cache_key, result)
-    return result
 
-def gridsearch(pairs, start_time, end_time, directory):
-    load('gridsearch.pkl')
+    # TODO: time in market could be another good factor to check for a final result. less time in market is better
+    return result # TODO: divide the result by number of sells or something... less sells is normally better.
+
+def get_all_data_pkl(pairs, start_time, end_time, directory):
+        # Create a string that represents the function parameters
+    params_str = str(pairs) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d')
+
+    # Create a hash of the parameters string
+    params_hash = xxhash.xxh64(params_str.encode()).hexdigest()
+
+    # Create a unique filename based on the hash
+    filename = f"historical_channel_data/all_data_{params_hash}.pkl"
+
+    # If the file exists, load it and return
+    if os.path.exists(filename):
+        with open(filename, 'rb') as f:
+           all_data = pickle.load(f)
+        return all_data
 
     train_data = {}
     start_month = start_time.replace(day=1)
@@ -193,16 +223,15 @@ def gridsearch(pairs, start_time, end_time, directory):
         for pair in pairs:
             data = load_month_data(pair, start_month, directory, minimal=True)
             if data is not None:
+                # Remove data that is after the end_time
+                data = data.loc[data.index <= end_time]
                 if pair not in train_data:
                     train_data[pair] = data
                 else:
                     train_data[pair] = pd.concat([train_data[pair], data])
         start_month += relativedelta(months=1)
-        
-    bnh_profit = calculate_buy_and_hold(train_data)
 
-    print('Buy and Hold profit:', bnh_profit)
-
+    # Python code
     all_data = {}
     for pair, data in train_data.items():
         data = data.reset_index()
@@ -210,6 +239,30 @@ def gridsearch(pairs, start_time, end_time, directory):
         all_data[pair] = data
 
     all_data = pd.concat(all_data.values(), ignore_index=True)
+
+    # Convert 'open_time' to datetime and round to the nearest hour
+    all_data['open_time'] = pd.to_datetime(all_data['open_time']).dt.round('h')
+
+    # Calculate the list of unique pairs for each hour
+    hourly_pairs = all_data.groupby('open_time')['pair'].unique().reset_index()
+
+    # Merge 'hourly_pairs' into 'all_data'
+    all_data = pd.merge(all_data, hourly_pairs, on='open_time', how='left', suffixes=('', '_hourly'))
+
+    # Save all_data to a pickle file
+    with open(filename, 'wb') as f:
+        pickle.dump(all_data, f)
+
+    return all_data
+
+def gridsearch(pairs, start_time, end_time, directory):
+    # load('gridsearch.pkl')
+
+    all_data = get_all_data_pkl(pairs, start_time, end_time, directory)
+        
+    bnh_profit = calculate_buy_and_hold(all_data)
+
+    print('Buy and Hold profit:', bnh_profit)
 
     param_grid = {
         'price_jump_threshold': price_jump_threshold_range,
@@ -221,7 +274,7 @@ def gridsearch(pairs, start_time, end_time, directory):
     }
 
     splits = 2
-    n_jobs = 12
+    n_jobs = 10
 
     # Calculate the total number of jobs
     total_jobs = len(ParameterGrid(param_grid)) * splits
@@ -250,15 +303,15 @@ def gridsearch(pairs, start_time, end_time, directory):
     print('Best score:', best_score)
     print('Best parameters:', best_params)
 
-    dump('gridsearch.pkl')
+    # dump('gridsearch.pkl')
 
 
 def calculate_buy_and_hold(data):
     # Get the candle data for the BTCUSDT pair
-    btcusdt_data = data['BTCUSDT']
+    btcusdt_data = data.loc[data['pair'] == 'BTCUSDT']
 
     # Get the close price of the first candle we process (index 1000)
-    buy_price = float(btcusdt_data.iloc[0]['close'])
+    buy_price = float(btcusdt_data.iloc[1000]['close'])
 
     # Get the close price of the last candle
     sell_price = float(btcusdt_data.iloc[-1]['close'])
