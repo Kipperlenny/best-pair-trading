@@ -89,7 +89,12 @@ class StrategyEstimator(BaseEstimator):
 def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit):
     r = get_redis_server()
     
-    grouped_data_hash = xxhash.xxh64(str(grouped_data)).hexdigest()
+    # Convert the DataFrameGroupBy object to a binary string using pickle
+    grouped_data_str = pickle.dumps(grouped_data)
+
+    # Create a hash of the binary string using xxhash
+    grouped_data_hash = xxhash.xxh64(grouped_data_str).hexdigest()
+
     data_hash = create_data_hash(data)
     params_hash = xxhash.xxh64(str((price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit))).hexdigest()
 
@@ -98,6 +103,7 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
     start_time = timemod.time()
     # Check if the result is in the cache
     result = r.get(cache_key)
+    # print(grouped_data_hash, str((price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)), cache_key, result)
     if result is not None:
         # print("Time taken for cache check: ", timemod.time() - start_time)
         print(sys.stdout.get_line_count() * n_jobs, '/', max_jobs, 'cache result:', result, 'parameters:', price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)

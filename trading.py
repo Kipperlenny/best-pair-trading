@@ -1,4 +1,5 @@
 import math
+import pickle
 import statistics
 from binance import AsyncClient
 from binance.exceptions import BinanceAPIException
@@ -162,6 +163,7 @@ def get_best_channel_pair(all_data, cache_key, pair_list, time, price_jump_thres
     result = r.get(cache_key)
     if result is not None:
         result = result.decode('utf-8')
+        # print("Result from get_best_channel_pair global cache", result)
         if result == 'None':
             result = None
         return result
@@ -182,12 +184,19 @@ def get_best_channel_pair(all_data, cache_key, pair_list, time, price_jump_thres
 
     # Reduce the subset to the last 1000 rows for each pair
     subset_data = subset_data[subset_data['pair'].isin(valid_pairs)].groupby('pair').tail(1000)
+
+    # Convert the DataFrameGroupBy object to a binary string using pickle
+    subset_data_str = pickle.dumps(subset_data)
+
+    # Create a hash of the binary string using xxhash
+    grouped_data_hash = xxhash.xxh64(subset_data_str).hexdigest()
     
     # Check if the result is in the cache for this subset
-    sub_cache_key = create_cache_key(xxhash.xxh64(str(subset_data)).hexdigest(), pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
+    sub_cache_key = create_cache_key(grouped_data_hash, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
     result = r.get(sub_cache_key)
     if result is not None:
         result = result.decode('utf-8')
+        # print("Result from get_best_channel_pair subset cache", result)
         if result == 'None':
             result = None
         return result
