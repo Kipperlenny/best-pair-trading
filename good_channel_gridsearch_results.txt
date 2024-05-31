@@ -1,7 +1,23 @@
-
-
-50 / 540 sells 21 result: 352.1268040171972 parameters: 0.1 0.1 5 1 SMA 1.01
-130 / 540 sells 9 result: 301.0851654804686 parameters: 0.2 0.1 5 1 SMA 1.01
-50 / 540 sells 18 result: 237.3689715051612 parameters: 0.1 0.1 5 1 SMA 1.01
-130 / 540 sells 27 result: 118.39961548268718 parameters: 0.1 0.1 10 2 SMA 1.01
-70 / 540 sells 14 result: 116.69491882121747 parameters: 0.1 0.1 10 1 SMA 1.01
+start_candle: 2023-10-01 00:00:00, end_candle: 2024-05-14 23:59:00
+total_days: 226, train_days: 180
+train_test_split: 0.8
+Train data: from 2023-10-01 00:00:00 to 2024-03-29 00:00:00
+Test data: from 2024-03-29 00:01:00 to 2024-05-14 23:59:00
+Hyperopting on the train data with 379 pairs
+Bought BTC for 27567.83984375 and sold for 70788.0078125
+Buy and Hold profit: 15677.749222904236
+0 / 8 sells 388 result: 8297.38866952376 parameters: 0.2 0.5 50 2 EMA 1.01
+0 / 8 sells 264 result: 7838.943144050106 parameters: 0.2 0.5 50 2 EMA 1.02
+0 / 8 sells 396 result: 9174.280229628755 parameters: 0.2 0.5 50 2 EMA 1.01
+0 / 8 sells 234 result: 10124.063513077259 parameters: 0.2 0.5 50 2 EMA 1.03
+6 / 8 sells 89 result: 8932.76776525202 parameters: 0.2 0.5 50 2 EMA 1.1
+0 / 8 sells 318 result: 11095.397544109954 parameters: 0.2 0.5 50 2 EMA 1.02
+6 / 8 sells 91 result: 10376.352204190734 parameters: 0.2 0.5 50 2 EMA 1.1
+0 / 8 sells 223 result: 9387.199989611854 parameters: 0.2 0.5 50 2 EMA 1.03
+0 / 8 sells 238 result: 10043.715155823236 parameters: 0.2 0.5 50 2 EMA 1.03
+8735.834449576258 {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.01}
+9467.17034408003 {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.02}
+9755.631751344557 {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.03}
+9654.559984721378 {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.1}
+Best score: 9755.631751344557
+Best parameters: {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.03}

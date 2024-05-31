@@ -27,13 +27,14 @@ rolling_window_number_range = range(10, 30, 2)
 std_for_BB_range = np.arange(1, 3, 0.1)
 moving_average_type_range = ['SMA', 'EMA']'''
 
-price_jump_threshold_range = [0.02, 0.1, 0.2] # if price in one 5min candle jumps more than this percent, remove the pair from consideration
-last_price_treshold_range = [0.1, 0.25, 0.5] #np.arange(0.4, 0.6, 0.05) # if the last price is more than this percent of the lower BB, remove the pair from consideration
-wished_profit_range = [1.01] #np.arange(1.01, 1.05, 0.01)
-rolling_window_number_range = [2, 5, 10, 25, 50]
-std_for_BB_range = [1, 2, 3] #np.arange(1, 3, 0.5)
-moving_average_type_range = ['SMA', 'EMA']
+price_jump_threshold_range = [0.02, 0.1, 0.2]# [0.2] # if price in one 5min candle jumps more than this percent, remove the pair from consideration
+last_price_treshold_range = [0.1, 0.25, 0.5] # [0.5] #np.arange(0.4, 0.6, 0.05) # if the last price is more than this percent of the lower BB, remove the pair from consideration
+wished_profit_range = [1.01, 1.03, 1.1] #np.arange(1.01, 1.05, 0.01)
+rolling_window_number_range = [2, 10, 50, 500, 1000] # [50]
+std_for_BB_range = [1, 2, 3] # [2] #np.arange(1, 3, 0.5)
+moving_average_type_range = ['SMA', 'EMA'] # ['EMA']
 
+global_hyperopt_version_cache_prefix = 'V1_'
 
 class LineCountingStream:
     def __init__(self, stdout):
@@ -61,9 +62,10 @@ line_counting_stream = LineCountingStream(original_stdout)
 sys.stdout = line_counting_stream
     
 class StrategyEstimator(BaseEstimator):
-    def __init__(self, n_jobs, max_jobs, price_jump_threshold=None, last_price_treshold=None, rolling_window_number=None, std_for_BB=None, moving_average_type=None, wished_profit=None):
+    def __init__(self, data_dict, n_jobs, max_jobs, price_jump_threshold=None, last_price_treshold=None, rolling_window_number=None, std_for_BB=None, moving_average_type=None, wished_profit=None):
         self.max_jobs = max_jobs
         self.n_jobs = n_jobs
+        self.data_dict = data_dict
         self.price_jump_threshold = price_jump_threshold
         self.last_price_treshold = last_price_treshold
         self.rolling_window_number = rolling_window_number
@@ -74,7 +76,7 @@ class StrategyEstimator(BaseEstimator):
     def fit(self, X, y=None):
         X = X.copy(deep=True)
         grouped_X = X.groupby('open_time')
-        self.strategy_result_ = calculate_strategy(grouped_X, X, self.n_jobs, self.max_jobs, self.price_jump_threshold, self.last_price_treshold, self.rolling_window_number, self.std_for_BB, self.moving_average_type, self.wished_profit)
+        self.strategy_result_ = calculate_strategy(grouped_X, X, self.data_dict, self.n_jobs, self.max_jobs, self.price_jump_threshold, self.last_price_treshold, self.rolling_window_number, self.std_for_BB, self.moving_average_type, self.wished_profit)
         return self
 
     def score(self, X, y=None):
@@ -86,7 +88,7 @@ class StrategyEstimator(BaseEstimator):
         grouped_X = X.groupby('open_time')
         return calculate_strategy(grouped_X, X, 1, 1, self.price_jump_threshold, self.last_price_treshold, self.rolling_window_number, self.std_for_BB, self.moving_average_type, self.wished_profit)
 
-def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit):
+def calculate_strategy(grouped_data, data, data_dict, n_jobs, max_jobs, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit):
     r = get_redis_server()
     
     # Convert the DataFrameGroupBy object to a binary string using pickle
@@ -98,7 +100,7 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
     data_hash = create_data_hash(data)
     params_hash = xxhash.xxh64(str((price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit))).hexdigest()
 
-    cache_key = str(grouped_data_hash) + str(data_hash) + str(params_hash)
+    cache_key = global_hyperopt_version_cache_prefix + str(grouped_data_hash) + str(data_hash) + str(params_hash)
 
     start_time = timemod.time()
     # Check if the result is in the cache
@@ -132,15 +134,10 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
         day = time.day
 
         # only check for buying every hour
-        if minute < 5:
-
+        if minute < 5 and len(open_orders) < 10:
             pair_list = data.loc[data['open_time'] == time, 'pair_hourly'].iloc[0]
-
             channel_pair_cache_key = create_cache_key(grouped_data_hash, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
-
             best_pair = get_best_channel_pair(data, channel_pair_cache_key, pair_list, time, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type)
-            
-            # print("Time taken for get_best_channel_pair: ", timemod.time() - start_time_inner)
 
             if best_pair and best_pair is not None:
                 if not any(order_pair == best_pair for order_pair, _ in open_orders):
@@ -152,15 +149,16 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
             order_pair, buy_time = order
 
             if time > buy_time and time <= last_time:
-                buy_data = data.loc[(data['open_time'] == buy_time) & (data['pair'] == order_pair)]
-                sell_data = data.loc[(data['open_time'] == time) & (data['pair'] == order_pair)]
+                # Look up the buy and sell data in the dictionary
+                buy_data = data_dict.get((order_pair, buy_time))
+                sell_data = data_dict.get((order_pair, time))
 
-                if buy_data.empty or sell_data.empty:
+                if buy_data is None or sell_data is None:
                     open_orders.remove(order)
                     continue
 
-                buy_price = float(buy_data.iloc[0]["close"])
-                sell_price = float(sell_data.iloc[0]["close"])
+                buy_price = float(buy_data[0])
+                sell_price = float(sell_data[0])
 
                 if buy_price == 0:
                     open_orders.remove(order)
@@ -174,24 +172,23 @@ def calculate_strategy(grouped_data, data, n_jobs, max_jobs, price_jump_threshol
                     sells += 1
                     open_orders.remove(order)
 
+        # print("Time taken for open_orders: ", timemod.time() - start_time_inner)
+
     # print("Time taken for grouped_data_list: ", timemod.time() - start_time)
     
     # after all candles have been processed, calculate the value of open positions
     for order in open_orders:
         order_pair, buy_time = order
 
-        try:
-            buy_group = grouped_data.get_group(buy_time)
-            buy_group = buy_group[buy_group['pair'] == order_pair]
-            end_group = group[group['pair'] == order_pair]
-        except KeyError:
+        # Look up the buy and end data in the dictionary
+        buy_data = data_dict.get((order_pair, buy_time))
+        end_data = data_dict.get((order_pair, time))
+
+        if buy_data is None or end_data is None:
             continue
 
-        if buy_group.empty or end_group.empty:
-            continue
-
-        buy_value = float(buy_group.iloc[0]["close"])
-        end_value = float(end_group.iloc[0]["close"])
+        buy_value = float(buy_data[0])
+        end_value = float(end_data[0])
 
         units_bought = 1000 / buy_value
         end_value_units = units_bought * end_value
@@ -279,14 +276,20 @@ def gridsearch(pairs, start_time, end_time, directory):
         'wished_profit': wished_profit_range
     }
 
+    # Create a dictionary that maps from (pair, open_time) to (close, open_time)
+    data_dict = {(row['pair'], row['open_time']): (row['close'], row['open_time']) for _, row in all_data.iterrows()}
+
+    # make data_dict unique
+    data_dict = {k: v for k, v in data_dict.items() if v is not None}
+
     splits = 2
-    n_jobs = 10
+    n_jobs = 5 # should work with 64 GB memory and 180 days of data 
 
     # Calculate the total number of jobs
     total_jobs = len(ParameterGrid(param_grid)) * splits
 
     # Create a StrategyEstimator instance
-    estimator = StrategyEstimator(n_jobs=n_jobs, max_jobs=total_jobs)
+    estimator = StrategyEstimator(n_jobs=n_jobs, max_jobs=total_jobs, data_dict=data_dict)
 
     # Create a TimeSeriesSplit object
     tscv = TimeSeriesSplit(n_splits=splits)
@@ -324,13 +327,13 @@ def calculate_buy_and_hold(data):
 
     print("Bought BTC for", buy_price, "and sold for", sell_price)
 
-    # Calculate the number of units bought with 1000$
-    units_bought = 1000 / buy_price
+    # Calculate the number of units bought with 10000$ (10k because we will use 10k for trading later (1000$ per trade))
+    units_bought = 10000 / buy_price
 
     # Calculate the sell value based on the number of units
     sell_value = units_bought * sell_price
 
     # Calculate the profit
-    profit = sell_value - 1000
+    profit = sell_value - 10000
 
     return profit
