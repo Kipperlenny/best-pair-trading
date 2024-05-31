@@ -22,7 +22,6 @@ def load_month_data(pair, month, directory='historical_data', minimal = False):
                 p['close_time'] = p['close_time'].dt.round('min')
 
             if minimal:
-                if 'quote_asset_volume' in p: del p['quote_asset_volume']
                 if 'number_of_trades' in p: del p['number_of_trades']
                 if 'taker_buy_base_asset_volume' in p: del p['taker_buy_base_asset_volume']
                 if 'taker_buy_quote_asset_volume' in p: del p['taker_buy_quote_asset_volume']
@@ -83,15 +82,14 @@ async def download_historical_data(client, pairs, start_time, end_time, interval
                     df['high'] = df['high'].astype('float32')
                     df['low'] = df['low'].astype('float32')
                     df['number_of_trades'] = df['number_of_trades'].astype(int)
-                    df['volume'] = df['volume'].astype(int)
-                    df['quote_asset_volume'] = df['quote_asset_volume'].astype('float32')
+                    df['volume'] = df['volume'].apply(lambda x: int(round(float(x))))
+                    df['quote_asset_volume'] = df['quote_asset_volume'].apply(lambda x: int(round(float(x))))
                     df['taker_buy_base_asset_volume'] = df['taker_buy_base_asset_volume'].astype('float32')
                     df['taker_buy_quote_asset_volume'] = df['taker_buy_quote_asset_volume'].astype('float32')
                     df['open'] = df['open'].astype('float32')
                     df['close'] = df['close'].astype('float32')
 
                     if minimal:
-                        if 'quote_asset_volume' in df: del df['quote_asset_volume']
                         if 'number_of_trades' in df: del df['number_of_trades']
                         if 'taker_buy_base_asset_volume' in df: del df['taker_buy_base_asset_volume']
                         if 'taker_buy_quote_asset_volume' in df: del df['taker_buy_quote_asset_volume']

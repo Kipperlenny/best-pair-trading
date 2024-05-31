@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import itertools
+import json
 import os
 import pickle
 from sklearn.model_selection import ParameterGrid, TimeSeriesSplit
@@ -11,11 +12,14 @@ from historic_data import load_month_data
 import numpy as np
 from sklearn.model_selection import GridSearchCV
 from pandas.tseries.offsets import DateOffset
-from cache import create_data_hash, create_cache_key
+from cache import create_data_hash, create_cache_key, get_redis_server_url
 import sys
 import time as timemod
 from cache import get_redis_server
 import xxhash
+import optuna
+from sklearn.model_selection import train_test_split
+
 
 # parameters to hyperopt
 '''price_jump_threshold_range = np.arange(0.05, 0.15, 0.01)
@@ -27,12 +31,12 @@ rolling_window_number_range = range(10, 30, 2)
 std_for_BB_range = np.arange(1, 3, 0.1)
 moving_average_type_range = ['SMA', 'EMA']'''
 
-price_jump_threshold_range = [0.02, 0.1, 0.2]# [0.2] # if price in one 5min candle jumps more than this percent, remove the pair from consideration
-last_price_treshold_range = [0.1, 0.25, 0.5] # [0.5] #np.arange(0.4, 0.6, 0.05) # if the last price is more than this percent of the lower BB, remove the pair from consideration
-wished_profit_range = [1.01, 1.03, 1.1] #np.arange(1.01, 1.05, 0.01)
-rolling_window_number_range = [2, 10, 50, 500, 1000] # [50]
-std_for_BB_range = [1, 2, 3] # [2] #np.arange(1, 3, 0.5)
-moving_average_type_range = ['SMA', 'EMA'] # ['EMA']
+price_jump_threshold_range = [0.02, 0.1, 0.17]
+last_price_treshold_range = [0.1, 0.25, 0.4]
+wished_profit_range = [1.01, 1.03, 1.1]
+rolling_window_number_range = [2, 10, 50, 500, 1000] 
+std_for_BB_range = [1, 2, 3]
+moving_average_type_range = ['SMA', 'EMA']
 
 global_hyperopt_version_cache_prefix = 'V1_'
 
@@ -203,15 +207,15 @@ def calculate_strategy(grouped_data, data, data_dict, n_jobs, max_jobs, price_ju
     # TODO: time in market could be another good factor to check for a final result. less time in market is better
     return result # TODO: divide the result by number of sells or something... less sells is normally better.
 
-def get_all_data_pkl(pairs, start_time, end_time, directory):
+def get_all_data_pkl(pairs, start_time, end_time, candle_directory, cache_directory):
         # Create a string that represents the function parameters
-    params_str = str(pairs) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d')
+    params_str = str(xxhash.xxh64(json.dumps(pairs).encode()).hexdigest()) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d')
 
     # Create a hash of the parameters string
     params_hash = xxhash.xxh64(params_str.encode()).hexdigest()
 
     # Create a unique filename based on the hash
-    filename = f"historical_channel_data/all_data_{params_hash}.pkl"
+    filename = f"{cache_directory}/all_data_{params_hash}.pkl"
 
     # If the file exists, load it and return
     if os.path.exists(filename):
@@ -224,7 +228,7 @@ def get_all_data_pkl(pairs, start_time, end_time, directory):
     end_month = end_time.replace(day=1)
     while start_month <= end_month:
         for pair in pairs:
-            data = load_month_data(pair, start_month, directory, minimal=True)
+            data = load_month_data(pair, start_month, candle_directory, minimal=True)
             if data is not None:
                 # Remove data that is after the end_time
                 data = data.loc[data.index <= end_time]
@@ -233,12 +237,12 @@ def get_all_data_pkl(pairs, start_time, end_time, directory):
                 else:
                     train_data[pair] = pd.concat([train_data[pair], data])
         start_month += relativedelta(months=1)
-
-    # Python code
+    
     all_data = {}
     for pair, data in train_data.items():
         data = data.reset_index()
         data['pair'] = pair
+        # TODO add more features here
         all_data[pair] = data
 
     all_data = pd.concat(all_data.values(), ignore_index=True)
@@ -246,11 +250,27 @@ def get_all_data_pkl(pairs, start_time, end_time, directory):
     # Convert 'open_time' to datetime and round to the nearest hour
     all_data['open_time'] = pd.to_datetime(all_data['open_time']).dt.round('h')
 
-    # Calculate the list of unique pairs for each hour
-    hourly_pairs = all_data.groupby('open_time')['pair'].unique().reset_index()
+    # Calculate the total volume for each pair
+    total_volume = all_data.groupby('pair')['quote_asset_volume'].sum()
+
+    # Sort the pairs by volume in descending order and keep only the top 20
+    top_pairs = total_volume.sort_values(ascending=False).head(20).index
+
+    # Keep only the rows in the data where the pair is one of the top pairs
+    all_data = all_data[all_data['pair'].isin(top_pairs)]
+
+    # Group by 'open_time' and get the unique pairs for each hour
+    hourly_pairs = all_data.groupby(all_data['open_time'])['pair'].apply(lambda x: list(x.unique())).reset_index()
+
+    # Rename the column in 'hourly_pairs' to 'pair_hourly'
+    hourly_pairs.rename(columns={'pair': 'pair_hourly'}, inplace=True)
 
     # Merge 'hourly_pairs' into 'all_data'
-    all_data = pd.merge(all_data, hourly_pairs, on='open_time', how='left', suffixes=('', '_hourly'))
+    all_data = pd.merge(all_data, hourly_pairs, on='open_time', how='left')
+
+    # remove all candles where 'pair_hourly' is not the same like in the first candle
+    # Keep only the rows where 'pair' is included in all_data['pair_hourly'].iloc[0]
+    all_data = all_data[all_data['pair'].isin(all_data['pair_hourly'].iloc[0])]
 
     # Save all_data to a pickle file
     with open(filename, 'wb') as f:
@@ -258,10 +278,10 @@ def get_all_data_pkl(pairs, start_time, end_time, directory):
 
     return all_data
 
-def gridsearch(pairs, start_time, end_time, directory):
+def gridsearch(pairs, start_time, end_time, candle_directory, cache_directory):
     # load('gridsearch.pkl')
 
-    all_data = get_all_data_pkl(pairs, start_time, end_time, directory)
+    all_data = get_all_data_pkl(pairs, start_time, end_time, candle_directory, cache_directory)
         
     bnh_profit = calculate_buy_and_hold(all_data)
 
@@ -282,13 +302,40 @@ def gridsearch(pairs, start_time, end_time, directory):
     # make data_dict unique
     data_dict = {k: v for k, v in data_dict.items() if v is not None}
 
-    splits = 2
-    n_jobs = 5 # should work with 64 GB memory and 180 days of data 
+    def objective(trial):
+        # Define the hyperparameters using the trial object
+        log_rolling_window_number = trial.suggest_float('log_rolling_window_number', np.log10(param_grid['rolling_window_number'][0]), np.log10(param_grid['rolling_window_number'][-1]))
+        rolling_window_number = int(10 ** log_rolling_window_number)
+        
+        price_jump_threshold = trial.suggest_float('price_jump_threshold', param_grid['price_jump_threshold'][0], param_grid['price_jump_threshold'][-1], step=0.05)
+        last_price_treshold = trial.suggest_float('last_price_treshold', param_grid['last_price_treshold'][0], param_grid['last_price_treshold'][-1], step=0.15)
+        std_for_BB = trial.suggest_int('std_for_BB', param_grid['std_for_BB'][0], param_grid['std_for_BB'][-1], step=1)
+        moving_average_type = trial.suggest_categorical('moving_average_type', moving_average_type_range)
+        wished_profit = trial.suggest_float('wished_profit', param_grid['wished_profit'][0], param_grid['wished_profit'][-1], step=0.01)
 
-    # Calculate the total number of jobs
-    total_jobs = len(ParameterGrid(param_grid)) * splits
+        # Calculate the profit using the calculate_strategy function
+        X = all_data.copy(deep=True)
+        grouped_X = X.groupby('open_time')
+        profit = calculate_strategy(grouped_X, X, data_dict, 1, 1, price_jump_threshold, last_price_treshold, rolling_window_number, std_for_BB, moving_average_type, wished_profit)
+
+        return profit
+
+    # Create a study object and optimize the objective
+    storage = optuna.storages.JournalStorage(optuna.storages.JournalRedisStorage(get_redis_server_url()))
+    study = optuna.create_study(study_name='gridsearch_' + str(xxhash.xxh64(json.dumps(pairs).encode()).hexdigest()) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d'), direction='maximize', storage=storage, load_if_exists=True)
+    study.optimize(objective, n_trials=5000, n_jobs=8)
+
+    # Get the best score and best parameters
+    best_score = study.best_value
+    best_params = study.best_params
+
+    print('Best score:', best_score)
+    print('Best parameters:', best_params)
+
+    return best_score
 
     # Create a StrategyEstimator instance
+    '''
     estimator = StrategyEstimator(n_jobs=n_jobs, max_jobs=total_jobs, data_dict=data_dict)
 
     # Create a TimeSeriesSplit object
@@ -307,10 +354,7 @@ def gridsearch(pairs, start_time, end_time, directory):
 
     # Print the score for each parameter combination
     for mean_score, params in zip(grid_search.cv_results_['mean_test_score'], grid_search.cv_results_['params']):
-        print(mean_score, params)
-
-    print('Best score:', best_score)
-    print('Best parameters:', best_params)
+        print(mean_score, params)'''
 
     # dump('gridsearch.pkl')
 

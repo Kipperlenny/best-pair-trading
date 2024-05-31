@@ -29,6 +29,9 @@ def stop_redis():
 def get_redis_server():
     return redis.Redis(host='localhost', port=redis_port, db=0)
 
+def get_redis_server_url():
+    return 'redis://localhost:' + str(redis_port)
+
 def create_data_hash(data):
     # Sum all close prices and multiply by the number of candles
     data_hash = data['close'].sum() * len(data)

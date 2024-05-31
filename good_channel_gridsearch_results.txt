@@ -21,3 +21,18 @@ Buy and Hold profit: 15677.749222904236
 9654.559984721378 {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.1}
 Best score: 9755.631751344557
 Best parameters: {'last_price_treshold': 0.5, 'moving_average_type': 'EMA', 'price_jump_threshold': 0.2, 'rolling_window_number': 50, 'std_for_BB': 2, 'wished_profit': 1.03}
+
+
+
+
+python hyperopt.py --start_candle "2024-04-01 00:00" --end_candle "2024-04-30 23:59"
+All data is up to date
+start_candle: 2024-04-01 00:00:00, end_candle: 2024-04-30 23:59:00
+total_days: 29, train_days: 23
+train_test_split: 0.8
+Train data: from 2024-04-01 00:00:00 to 2024-04-24 00:00:00
+Test data: from 2024-04-24 00:01:00 to 2024-04-30 23:59:00
+Hyperopting on the train data with 379 pairs
+Bought BTC for 66227.0703125 and sold for 66548.8515625
+Buy and Hold profit: 48.58757128793877
+Best parameters: {'log_rolling_window_number': 2.582224025268979, 'price_jump_threshold': 0.12000000000000001, 'last_price_treshold': 0.4, 'std_for_BB': 2, 'moving_average_type': 'SMA', 'wished_profit': 1.05}
