@@ -18,12 +18,13 @@ pd.set_option('display.max_columns', None)
 
 global_hyperopt_version_cache_prefix = 'Volumne_V1_'
 
-donchian_high_x_range = [4, 100, 2]
-donchian_low_x_range = [4, 100, 2]
-ema_x_range = [50, 600, 50] # long
-ema_y_range = [2, 40, 2] # short
-macd_x_range = [5, 200, 5] # signal line
-volume_x_range = [4, 100, 2]
+# Best parameters: {'donchian_high_x': 6, 'donchian_low_x': 70, 'ema_x': 550, 'ema_y': 38, 'macd_x': 90, 'volume_x': 70}
+donchian_high_x_range = [4, 6, 2]
+donchian_low_x_range = [68, 72, 2]
+ema_x_range = [500, 600, 50] # long
+ema_y_range = [36, 60, 2] # short
+macd_x_range = [85, 100, 5] # signal line
+volume_x_range = [65, 75, 2]
 
 # TODO: time in market could be another good factor to check for a final result. less time in market is better
 # TODO: divide the result by number of sells or something... less sells is normally better.
@@ -91,7 +92,7 @@ def calculate_strategy(data, ema_x, ema_y, macd_x, volume_x, donchian_high_x, do
                 # Close the order
                 resampled.at[order_index, 'sell_price'] = row['low']
                 profit = (row['low'] - buy_price) * (order_size / buy_price)
-                resampled.at[order_index, 'profit'] = profit
+                resampled.at[order_index, 'profit'] = int(profit)
                 available_capital += (order_size + profit)
                 resampled.at[order_index, 'order_active'] = False
                 open_orders.remove(order)
@@ -105,7 +106,7 @@ def calculate_strategy(data, ema_x, ema_y, macd_x, volume_x, donchian_high_x, do
             last_close = resampled[(resampled['pair'] == order_pair)].iloc[-1]['close']
             resampled.at[order_index, 'sell_price'] = last_close
             profit = (last_close - buy_price) * (order_size / buy_price)
-            resampled.at[order_index, 'profit'] = profit
+            resampled.at[order_index, 'profit'] = int(profit)
             available_capital += (order_size + profit)
             resampled.at[order_index, 'order_active'] = False
             # print(f"Force closing order at {order_index}, Pair: {order_pair}, Close: {last_close}, Profit: {profit}, Available capital: {available_capital}, Open orders: 0")
@@ -114,7 +115,6 @@ def calculate_strategy(data, ema_x, ema_y, macd_x, volume_x, donchian_high_x, do
     total_profit = resampled['profit'].sum()
 
     return total_profit
-
 
 def volumesearch(pairs, start_time, end_time, candle_directory, cache_directory):
 
@@ -137,12 +137,14 @@ def volumesearch(pairs, start_time, end_time, candle_directory, cache_directory)
         X = all_data.copy(deep=True)
         profit = calculate_strategy(X, ema_x, ema_y, macd_x, volume_x, donchian_high_x, donchian_low_x)
 
+        # Report the result to Optuna
+        trial.report(profit, step=0)
         return profit
 
     # Create a study object and optimize the objective
     storage = optuna.storages.JournalStorage(optuna.storages.JournalRedisStorage(get_redis_server_url()))
     study = optuna.create_study(study_name='volumesearch_v2_' + str(xxhash.xxh64(json.dumps(pairs).encode()).hexdigest()) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d'), direction='maximize', storage=storage, load_if_exists=True)
-    study.optimize(objective, n_trials=5000, n_jobs=10)
+    study.optimize(objective, n_trials=1000, n_jobs=8)
 
     # Get the best score and best parameters
     best_score = study.best_value
@@ -151,4 +153,4 @@ def volumesearch(pairs, start_time, end_time, candle_directory, cache_directory)
     print('Best score:', best_score)
     print('Best parameters:', best_params)
 
-    return best_score
+    return best_params

@@ -36,3 +36,12 @@ Hyperopting on the train data with 379 pairs
 Bought BTC for 66227.0703125 and sold for 66548.8515625
 Buy and Hold profit: 48.58757128793877
 Best parameters: {'log_rolling_window_number': 2.582224025268979, 'price_jump_threshold': 0.12000000000000001, 'last_price_treshold': 0.4, 'std_for_BB': 2, 'moving_average_type': 'SMA', 'wished_profit': 1.05}
+
+
+
+
+Best score: 37850.04978406316
+Best parameters: {'donchian_high_x': 6, 'donchian_low_x': 70, 'ema_x': 550, 'ema_y': 38, 'macd_x': 90, 'volume_x': 70}
+Best params: 37850.04978406316
+Best parameters: {'donchian_high_x': 6, 'donchian_low_x': 70, 'ema_x': 600, 'ema_y': 58, 'macd_x': 90, 'volume_x': 67}
+Best params: 37635.0

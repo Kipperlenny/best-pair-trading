@@ -5,7 +5,7 @@ from binance import AsyncClient
 import asyncio
 import os
 from dotenv import load_dotenv
-from historic_data import is_data_up_to_date, load_month_data, download_historical_data
+from historic_data import is_data_up_to_date, download_historical_data
 from cache import start_redis
 
 train_test_split = 0.8
@@ -95,10 +95,10 @@ async def main(args):
 
     # Check the strategy type and call the appropriate function
     if args.strategy_type == 'gridsearch':
-        from gridsearch import gridsearch
+        from gridsearch import gridsearch, calculate_strategy
         best_params = gridsearch(usdt_pairs, train_start_datetime, train_end_datetime, candle_directory, cache_directory)
     elif args.strategy_type == 'volume':
-        from volumesearch import volumesearch
+        from volumesearch import volumesearch, calculate_strategy, get_all_data_pkl, calculate_buy_and_hold
         best_params = volumesearch(usdt_pairs, train_start_datetime, train_end_datetime, candle_directory, cache_directory)
     else:
         print(f"Unknown strategy type: {args.strategy_type}")
@@ -106,13 +106,18 @@ async def main(args):
     
     print("Best params:", best_params)
 
-    # test params on test data
-    # print("Testing params on test data")
-    # test_result = calculate_strategy(test_data, *best_params)
+    if args.strategy_type == 'volume':
+        # test params on test data
+        print("Testing params on test data")
+        test_data = get_all_data_pkl(usdt_pairs, test_start_datetime, test_end_datetime, candle_directory, cache_directory)
+        bnh_profit = calculate_buy_and_hold(test_data)
+        test_result = calculate_strategy(test_data, best_params['ema_x'], best_params['ema_y'], best_params['macd_x'], best_params['volume_x'], best_params['donchian_high_x'], best_params['donchian_low_x'])
 
-    # end script with success message
-    # print("Test result:", test_result)
-    # print("Hyperopting script completed successfully")
+        # end script with success message
+        print("Test Buy and hold:", test_result)
+        print("Test result:", test_result)
+
+    print("Hyperopting script completed successfully")
 
 if __name__ == "__main__":
 

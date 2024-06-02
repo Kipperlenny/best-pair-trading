@@ -323,7 +323,7 @@ def gridsearch(pairs, start_time, end_time, candle_directory, cache_directory):
     # Create a study object and optimize the objective
     storage = optuna.storages.JournalStorage(optuna.storages.JournalRedisStorage(get_redis_server_url()))
     study = optuna.create_study(study_name='gridsearch_' + str(xxhash.xxh64(json.dumps(pairs).encode()).hexdigest()) + start_time.strftime('%Y%m%d') + end_time.strftime('%Y%m%d'), direction='maximize', storage=storage, load_if_exists=True)
-    study.optimize(objective, n_trials=5000, n_jobs=8)
+    study.optimize(objective, n_trials=1000, n_jobs=8)
 
     # Get the best score and best parameters
     best_score = study.best_value
