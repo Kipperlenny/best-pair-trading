@@ -7,11 +7,12 @@ from dateutil.relativedelta import relativedelta
 import pandas as pd
 from tqdm import tqdm
 
-def load_month_data(pair, month, directory='historical_data', minimal = False):
-    if minimal and os.path.exists(os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}_minimal.pkl.gz')):
-        file = os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}_minimal.pkl.gz')
+def load_month_data(pair, year, month, directory='historical_data', minimal=False):
+    date = datetime.datetime(year, month, 1)
+    if minimal and os.path.exists(os.path.join(directory, f'{pair}_{date.strftime("%Y_%m")}_minimal.pkl.gz')):
+        file = os.path.join(directory, f'{pair}_{date.strftime("%Y_%m")}_minimal.pkl.gz')
     else:
-        file = os.path.join(directory, f'{pair}_{month.strftime("%Y_%m")}.pkl.gz')
+        file = os.path.join(directory, f'{pair}_{date.strftime("%Y_%m")}.pkl.gz')
     if os.path.exists(file):
         with gzip.open(file, 'rb') as f:
             p = pickle.load(f)
@@ -30,7 +31,7 @@ def load_month_data(pair, month, directory='historical_data', minimal = False):
             return p
     else:
         return None
-
+    
 def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channel_data', minimal = False):
     start_month = start_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     end_month = end_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -42,7 +43,7 @@ def is_data_up_to_date(pairs, start_time, end_time, directory='historical_channe
                 print(f"File for {pair} in {file} is missing.")
                 not_up_to_date_pairs.append(pair)
             else:
-                data = load_month_data(pair, start_month, directory, minimal = minimal)
+                data = load_month_data(pair, start_month.year, start_month.month, directory, minimal = minimal)
                 if data is None:
                     print(f"Data for {pair} in {start_month.strftime('%Y-%m')} is missing.")
                     not_up_to_date_pairs.append(pair)

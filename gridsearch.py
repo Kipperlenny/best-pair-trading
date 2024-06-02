@@ -228,7 +228,7 @@ def get_all_data_pkl(pairs, start_time, end_time, candle_directory, cache_direct
     end_month = end_time.replace(day=1)
     while start_month <= end_month:
         for pair in pairs:
-            data = load_month_data(pair, start_month, candle_directory, minimal=True)
+            data = load_month_data(pair, start_month.year, start_month.month, candle_directory, minimal=True)
             if data is not None:
                 # Remove data that is after the end_time
                 data = data.loc[data.index <= end_time]

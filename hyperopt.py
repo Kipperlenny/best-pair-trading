@@ -137,8 +137,8 @@ if __name__ == "__main__":
     end_candle_date = datetime.strptime(args.end_candle, "%Y-%m-%d %H:%M") if args.end_candle else None
 
     # Compare start_candle_date to the datetime object for 2023-10-01
-    if args.start_candle and start_candle_date < datetime(2023, 10, 1):
-        print("Start candle must be after 2023-10-1")
+    if args.start_candle and start_candle_date < datetime(2020, 1, 1):
+        print("Start candle must be after 2020-01-01")
         exit()
 
     # Compare end_candle_date to start_candle_date + 1 week
